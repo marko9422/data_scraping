@@ -84,8 +84,29 @@ def clean_html(html):
     return soup.prettify()
 
 
+def compare_and_save(output_file, new_html):
+    """
+    Compare newly scraped HTML with the previous version.
+
+    First run: save as a new file.
+    Same content: keep the existing file unchanged.
+    Changed content: replace the old file with the new version.
+    """
+    if not output_file.exists():
+        output_file.write_text(new_html, encoding="utf-8")
+        return "NEW"
+
+    old_html = output_file.read_text(encoding="utf-8")
+
+    if old_html == new_html:
+        return "UNCHANGED"
+
+    output_file.write_text(new_html, encoding="utf-8")
+    return "CHANGED"
+
+
 async def scrape_site(crawler, site, run_config):
-    """Scrape and save one website. A failure does not stop other sites."""
+    """Scrape, clean, compare and save one website."""
     name = site["name"]
     url = site["url"]
     output_file = OUTPUT_DIR / make_filename(site)
@@ -107,7 +128,16 @@ async def scrape_site(crawler, site, run_config):
             return False
 
         cleaned = clean_html(html)
-        output_file.write_text(cleaned, encoding="utf-8")
+
+        # Compare the cleaned result before deciding whether to overwrite.
+        status = compare_and_save(output_file, cleaned)
+
+        if status == "NEW":
+            print("NEW: First scrape. HTML saved.")
+        elif status == "UNCHANGED":
+            print("UNCHANGED: Nothing changed. HTML is identical.")
+        else:
+            print("CHANGED: Website HTML changed. Previous file was updated.")
 
         original_size = len(html.encode("utf-8"))
         cleaned_size = len(cleaned.encode("utf-8"))
@@ -119,12 +149,12 @@ async def scrape_site(crawler, site, run_config):
             BeautifulSoup(cleaned, "html.parser").find_all("a", href=True)
         )
 
-        print("SUCCESS")
-        print(f"Saved: {output_file.relative_to(PROJECT_DIR)}")
+        print(f"File: {output_file.relative_to(PROJECT_DIR)}")
         print(f"Original size: {original_size:,} bytes")
         print(f"Cleaned size: {cleaned_size:,} bytes")
         print(f"Size reduction: {reduction:.1f}%")
         print(f"Links preserved: {link_count}")
+
         return True
 
     except Exception as error:
