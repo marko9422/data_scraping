@@ -94,6 +94,22 @@ def normalize_html_for_comparison(html):
     for tag in soup.find_all(["head", "link", "meta", "script", "style", "noscript"]):
         tag.decompose()
 
+    # Ignore cookie-consent controls; their order and labels can change independently
+    # of the actual page content.
+    cookie_control_labels = {
+        "cookie-einstellungen",
+        "weiter ohne einwilligung",
+        "schliessen",
+        "schließen",
+        "alle akzeptieren",
+        "auswahl speichern",
+        "einstellungen speichern",
+    }
+    for link in soup.find_all("a"):
+        label = link.get_text(" ", strip=True).casefold()
+        if label in cookie_control_labels:
+            link.decompose()
+
     for tag in soup.find_all(True):
         tag.attrs = {
             name: value
