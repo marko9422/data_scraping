@@ -2,6 +2,7 @@ import asyncio
 import difflib
 import json
 import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Comment
@@ -85,6 +86,40 @@ def clean_html(html):
     return soup.prettify()
 
 
+
+def normalize_html_for_comparison(html):
+    """Return stable page content, excluding technical and generated HTML noise."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup.find_all(["head", "link", "meta", "script", "style", "noscript"]):
+        tag.decompose()
+
+    for tag in soup.find_all(True):
+        tag.attrs = {
+            name: value
+            for name, value in tag.attrs.items()
+            if name in {"href", "title", "datetime"}
+        }
+
+        href = tag.get("href")
+        if href:
+            if href.startswith("#"):
+                del tag["href"]
+            else:
+                parts = urlsplit(href)
+                query = [
+                    (key, value)
+                    for key, value in parse_qsl(parts.query, keep_blank_values=True)
+                    if key.lower() not in {"ver", "v", "cb", "cache", "_"}
+                ]
+                tag["href"] = urlunsplit((
+                    parts.scheme, parts.netloc, parts.path,
+                    urlencode(query, doseq=True), ""
+                ))
+
+    return soup.prettify()
+
+
 def print_html_diff(old_html, new_html, filename):
     """Print a unified diff showing exactly which lines changed."""
     old_lines = old_html.splitlines()
@@ -135,12 +170,16 @@ def compare_and_save(output_file, new_html):
 
     old_html = output_file.read_text(encoding="utf-8")
 
-    if old_html == new_html:
+    old_content = normalize_html_for_comparison(old_html)
+    new_content = normalize_html_for_comparison(new_html)
+
+    if old_content == new_content:
         return "UNCHANGED"
 
-    # Show the exact differences before replacing the old version.
-    print_html_diff(old_html, new_html, output_file.name)
+    # Show only meaningful page content differences.
+    print_html_diff(old_content, new_content, output_file.name)
 
+    # Keep the latest cleaned HTML for the next comparison.
     output_file.write_text(new_html, encoding="utf-8")
     return "CHANGED"
 
@@ -172,9 +211,9 @@ async def scrape_site(crawler, site, run_config):
         if status == "NEW":
             print("NEW: First scrape. HTML saved.")
         elif status == "UNCHANGED":
-            print("UNCHANGED: Nothing changed. HTML is identical.")
+            print("UNCHANGED: No meaningful page content changed.")
         else:
-            print("CHANGED: Differences printed above. Saved the new HTML.")
+            print("CHANGED: Page content changed. Saved the new HTML.")
 
         original_size = len(html.encode("utf-8"))
         cleaned_size = len(cleaned.encode("utf-8"))
