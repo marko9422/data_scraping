@@ -7,6 +7,8 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
 
 URL = "https://stoos-hotels.ch/karriere/"
+# URL = "https://www.ochsen.ch/Jobs.htm"
+
 OUTPUT_FILE = Path("scrape_output/page_ai.html")
 
 
