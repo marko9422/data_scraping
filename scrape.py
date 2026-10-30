@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import json
 import re
 from pathlib import Path
@@ -84,13 +85,49 @@ def clean_html(html):
     return soup.prettify()
 
 
+def print_html_diff(old_html, new_html, filename):
+    """Print a unified diff showing exactly which lines changed."""
+    old_lines = old_html.splitlines()
+    new_lines = new_html.splitlines()
+
+    diff = list(difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"previous/{filename}",
+        tofile=f"current/{filename}",
+        lineterm="",
+        n=3,
+    ))
+
+    added = sum(
+        1 for line in diff
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    removed = sum(
+        1 for line in diff
+        if line.startswith("-") and not line.startswith("---")
+    )
+
+    print("\n" + "=" * 70)
+    print(f"CHANGES IN: {filename}")
+    print(f"Lines added: {added} | Lines removed: {removed}")
+    print("=" * 70)
+
+    if diff:
+        print("\n".join(diff))
+    else:
+        print("No line-level differences found.")
+
+    print("=" * 70 + "\n")
+
+
 def compare_and_save(output_file, new_html):
     """
-    Compare newly scraped HTML with the previous version.
+    Compare the new HTML with the saved version.
 
-    First run: save as a new file.
-    Same content: keep the existing file unchanged.
-    Changed content: replace the old file with the new version.
+    First run: save as NEW.
+    Same content: keep existing file.
+    Changed content: print differences, then replace existing file.
     """
     if not output_file.exists():
         output_file.write_text(new_html, encoding="utf-8")
@@ -100,6 +137,9 @@ def compare_and_save(output_file, new_html):
 
     if old_html == new_html:
         return "UNCHANGED"
+
+    # Show the exact differences before replacing the old version.
+    print_html_diff(old_html, new_html, output_file.name)
 
     output_file.write_text(new_html, encoding="utf-8")
     return "CHANGED"
@@ -121,15 +161,12 @@ async def scrape_site(crawler, site, run_config):
             print(f"FAILED: {result.error_message}")
             return False
 
-        # Prefer rendered HTML so dynamically loaded job listings are included.
         html = result.html or result.cleaned_html
         if not html:
             print("FAILED: The page returned empty HTML.")
             return False
 
         cleaned = clean_html(html)
-
-        # Compare the cleaned result before deciding whether to overwrite.
         status = compare_and_save(output_file, cleaned)
 
         if status == "NEW":
@@ -137,7 +174,7 @@ async def scrape_site(crawler, site, run_config):
         elif status == "UNCHANGED":
             print("UNCHANGED: Nothing changed. HTML is identical.")
         else:
-            print("CHANGED: Website HTML changed. Previous file was updated.")
+            print("CHANGED: Differences printed above. Saved the new HTML.")
 
         original_size = len(html.encode("utf-8"))
         cleaned_size = len(cleaned.encode("utf-8"))
