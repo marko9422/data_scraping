@@ -44,14 +44,18 @@ Return ONLY valid JSON with this schema:
     {{
       "title": "job title",
       "url": "absolute job URL",
-      "location": "",
+      "location": "workplace address or locality, followed by the Swiss canton when reliably known; otherwise exactly \"Neznáme\"",
       "employment_type": "",
       "description": ""
     }}
   ]
 }}
-Rules: Only actual vacancies, not navigation or general pages. Do not invent facts.
-Resolve relative links against {source_url}. Employer hint: {employer_hint}.
+Rules:
+- Only actual vacancies, not navigation or general pages. Do not invent facts.
+- Determine each job's workplace from the job listing first. If absent, look for the employer/hotel address elsewhere in the supplied HTML (contact, footer, address, location sections).
+- For Swiss locations, append the canton when it is explicitly stated or can be identified confidently from the stated address/locality. Format, for example, "Stoos, Kanton Schwyz" or "Zürich, Kanton Zürich".
+- If the workplace/address or canton cannot be determined reliably, use exactly "Neznáme". Never guess.
+- Resolve relative links against {source_url}. Employer hint: {employer_hint}.
 If there are no vacancies, return an empty jobs array.
 HTML:
 {html}
