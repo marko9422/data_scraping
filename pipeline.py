@@ -66,7 +66,7 @@ Rules:
 
 
 def extract_job_candidates(raw_html, source_url):
-    """Find compact text blocks around links; each link is a candidate job identity."""
+    """Find compact job-listing blocks while excluding navigation and cookie UI."""
     soup = BeautifulSoup(raw_html, "html.parser")
 
     # Remove non-content elements before finding listing blocks.
@@ -77,14 +77,58 @@ def extract_job_candidates(raw_html, source_url):
         tag.decompose()
 
     candidates = {}
+    source_normalized = source_url.split("#", 1)[0].rstrip("/").lower()
+    cookie_terms = (
+        "cookie", "consent", "privacy", "datenschutz",
+        "cmp-", "onetrust", "usercentrics", "borlabs"
+    )
+    cookie_text_terms = (
+        "wir verwenden cookies",
+        "cookie-einstellungen",
+        "weiter ohne einwilligung",
+        "alle cookies akzeptieren",
+        "nur notwendige cookies",
+        "we use cookies",
+        "cookie settings",
+        "accept all cookies",
+        "manage consent",
+    )
 
     for link in soup.find_all("a", href=True):
         href = urljoin(source_url, link["href"].strip())
         if not href.startswith(("http://", "https://")):
             continue
 
+        # Ignore links that simply point back to the listing page itself.
+        href_normalized = href.split("#", 1)[0].rstrip("/").lower()
+        if href_normalized == source_normalized:
+            continue
+
         label = link.get_text(" ", strip=True)
         if not label:
+            continue
+
+        # Ignore links inside common cookie/privacy/consent containers.
+        current = link
+        inside_cookie_container = False
+        for _ in range(8):
+            if current is None:
+                break
+            attrs = " ".join([
+                str(current.get("id", "")),
+                " ".join(current.get("class", []))
+                if isinstance(current.get("class"), list)
+                else str(current.get("class", "")),
+                str(current.get("role", "")),
+                str(current.get("aria-label", "")),
+            ]).lower()
+
+            if any(term in attrs for term in cookie_terms):
+                inside_cookie_container = True
+                break
+            current = current.parent
+
+        if inside_cookie_container:
             continue
 
         # Walk up from the link and select the nearest reasonably sized listing block.
@@ -93,6 +137,13 @@ def extract_job_candidates(raw_html, source_url):
         for _ in range(6):
             text = " ".join(block.get_text(" ", strip=True).split())
             link_count = len(block.find_all("a", href=True))
+
+            # Cookie notices can use generic containers without useful class names.
+            text_lower = text.lower()
+            if any(term in text_lower for term in cookie_text_terms):
+                selected_text = ""
+                break
+
             if 60 <= len(text) <= 3000 and link_count <= 5:
                 selected_text = text
                 break
@@ -103,7 +154,6 @@ def extract_job_candidates(raw_html, source_url):
         if not selected_text:
             continue
 
-        # Include the target URL in the hash so a changed link is detected too.
         content = f"URL: {href}\n{selected_text}"
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -117,7 +167,6 @@ def extract_job_candidates(raw_html, source_url):
             }
 
     return list(candidates.values())
-
 
 def load_job_state(path):
     """Load the previous per-website job and candidate snapshot."""
