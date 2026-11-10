@@ -40,33 +40,6 @@ session.auth = (WP_USER, WP_APP_PASSWORD)
 session.headers.update({"Content-Type": "application/json"})
 
 
-# Keep these instructions identical between requests so the provider can
-# reuse the same prompt prefix through automatic prompt caching.
-SYSTEM_PROMPT = """
-Extract current, specific job vacancies from the supplied cleaned HTML.
-Return ONLY valid JSON with this schema:
-{
-  "employer": "employer name or Unknown",
-  "jobs": [
-    {
-      "title": "job title",
-      "url": "absolute job URL",
-      "location": "workplace address or locality, followed by the Swiss canton when reliably known; otherwise exactly \\"Neznáme\\"",
-      "employment_type": "",
-      "description": ""
-    }
-  ]
-}
-Rules:
-- Only actual vacancies, not navigation or general pages. Do not invent facts.
-- Determine each job's workplace from the job listing first. If absent, look for the employer/hotel address elsewhere in the supplied HTML (contact, footer, address, location sections).
-- For Swiss locations, append the canton when it is explicitly stated or can be identified confidently from the stated address/locality. Format, for example, "Stoos, Kanton Schwyz" or "Zürich, Kanton Zürich".
-- If the workplace/address or canton cannot be determined reliably, use exactly "Neznáme". Never guess.
-- Resolve relative links using the website URL supplied in the user message.
-- If there are no vacancies, return an empty jobs array.
-"""
-
-
 # Stable instructions are kept first so automatic prompt caching can reuse them.
 SYSTEM_PROMPT = """
 Extract current, specific job vacancies from the supplied website listing snippets.
@@ -448,7 +421,6 @@ async def process_site(crawler, site, config):
             for job in extracted["jobs"]:
                 url = job["url"]
                 candidate = current_candidates.get(url)
-                old_record = old_jobs.get(url, {})
                 old_jobs[url] = {
                     **job,
                     "content_hash": (
