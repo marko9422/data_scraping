@@ -38,51 +38,76 @@ session.auth = (WP_USER, WP_APP_PASSWORD)
 session.headers.update({"Content-Type": "application/json"})
 
 
-def extract_jobs(html, source_url, employer_hint):
-    """Send cleaned HTML to AI and return extracted jobs plus token usage."""
-    prompt = f"""
-Extract current, specific job vacancies from this cleaned HTML.
+# Keep these instructions identical between requests so the provider can
+# reuse the same prompt prefix through automatic prompt caching.
+SYSTEM_PROMPT = """
+Extract current, specific job vacancies from the supplied cleaned HTML.
 Return ONLY valid JSON with this schema:
-{{
+{
   "employer": "employer name or Unknown",
   "jobs": [
-    {{
+    {
       "title": "job title",
       "url": "absolute job URL",
-      "location": "workplace address or locality, followed by the Swiss canton when reliably known; otherwise exactly \"Neznáme\"",
+      "location": "workplace address or locality, followed by the Swiss canton when reliably known; otherwise exactly \\"Neznáme\\"",
       "employment_type": "",
       "description": ""
-    }}
+    }
   ]
-}}
+}
 Rules:
 - Only actual vacancies, not navigation or general pages. Do not invent facts.
 - Determine each job's workplace from the job listing first. If absent, look for the employer/hotel address elsewhere in the supplied HTML (contact, footer, address, location sections).
 - For Swiss locations, append the canton when it is explicitly stated or can be identified confidently from the stated address/locality. Format, for example, "Stoos, Kanton Schwyz" or "Zürich, Kanton Zürich".
 - If the workplace/address or canton cannot be determined reliably, use exactly "Neznáme". Never guess.
-- Resolve relative links against {source_url}. Employer hint: {employer_hint}.
-If there are no vacancies, return an empty jobs array.
-HTML:
-{html}
+- Resolve relative links using the website URL supplied in the user message.
+- If there are no vacancies, return an empty jobs array.
 """
+
+
+def extract_jobs(html, source_url, employer_hint):
+    """Send stable instructions plus website-specific HTML and return token usage."""
     response = ai.chat.completions.create(
         model=META_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            # Stable system prompt comes first and is the cacheable prefix.
+            {"role": "system", "content": SYSTEM_PROMPT},
+            # Website-specific content changes, so it follows the stable prompt.
+            {
+                "role": "user",
+                "content": (
+                    f"Website URL: {source_url}\n"
+                    f"Employer hint: {employer_hint}\n\n"
+                    f"HTML:\n{html}"
+                ),
+            },
+        ],
         temperature=0,
         max_tokens=4000,
     )
 
-    # Read token counts reported by the API. Some compatible providers may omit them.
+    # Providers may report cached tokens inside prompt_tokens_details.
     usage = response.usage
+    prompt_details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    cached_tokens = (
+        getattr(prompt_details, "cached_tokens", 0)
+        if prompt_details is not None else 0
+    ) or 0
+
     token_usage = {
-        "input": getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None),
-        "output": getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None),
+        "input": (
+            getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None)
+        ) if usage else None,
+        "cached": cached_tokens,
+        "output": (
+            getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None)
+        ) if usage else None,
     }
 
     raw = response.choices[0].message.content or ""
     data = json.loads(raw)
 
-    # Basic validation prevents malformed AI output from reaching WordPress.
+    # Validate the AI response before allowing it to reach WordPress.
     if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
         raise ValueError("AI response does not match expected JSON schema")
 
@@ -93,7 +118,6 @@ HTML:
         job["url"] = urljoin(source_url, job["url"])
 
     return data, token_usage
-
 
 def wp_request(method, url=WP_BASE, **kwargs):
     """Send one authenticated request to the WordPress REST API."""
@@ -187,7 +211,7 @@ def sync_jobs(site, extracted):
 
 def print_summary(results):
     """Print a compact per-website report and totals for the whole run."""
-    columns = ("Website", "HTML", "AI", "Jobs", "Input tok.", "Output tok.", "Time")
+    columns = ("Website", "HTML", "AI", "Jobs", "Input tok.", "Cached tok.", "Output tok.", "Cache %", "Time")
     rows = []
 
     for item in results:
@@ -197,7 +221,12 @@ def print_summary(results):
             item["ai"],
             str(item["jobs"]),
             str(item["input_tokens"]) if item["input_tokens"] is not None else "N/A",
+            str(item["cached_tokens"]) if item["cached_tokens"] is not None else "N/A",
             str(item["output_tokens"]) if item["output_tokens"] is not None else "N/A",
+            (
+                f'{item["cached_tokens"] / item["input_tokens"] * 100:.1f}%'
+                if item["input_tokens"] else "N/A"
+            ),
             f'{item["seconds"]:.1f}s',
         ))
 
@@ -216,7 +245,9 @@ def print_summary(results):
         print(" | ".join(row[i].ljust(widths[i]) for i in range(len(columns))))
 
     total_input = sum(x["input_tokens"] or 0 for x in results)
+    total_cached = sum(x["cached_tokens"] or 0 for x in results)
     total_output = sum(x["output_tokens"] or 0 for x in results)
+    cache_rate = total_cached / total_input * 100 if total_input else 0
     total_jobs = sum(x["jobs"] for x in results)
     total_created = sum(x["created"] for x in results)
     total_updated = sum(x["updated"] for x in results)
@@ -225,6 +256,7 @@ def print_summary(results):
     print("-" * (sum(widths) + 3 * len(widths) + 1))
     print(
         f"TOTAL | Jobs found: {total_jobs} | Input tokens: {total_input} "
+        f"| Cached tokens: {total_cached} | Cache hit rate: {cache_rate:.1f}% "
         f"| Output tokens: {total_output}"
     )
     print(
@@ -244,6 +276,7 @@ async def process_site(crawler, site, config):
         "ai": "NO",
         "jobs": 0,
         "input_tokens": None,
+        "cached_tokens": None,
         "output_tokens": None,
         "created": 0,
         "updated": 0,
@@ -290,12 +323,14 @@ async def process_site(crawler, site, config):
     stats["ai"] = "YES"
     extracted, token_usage = extract_jobs(cleaned, site["url"], site["name"])
     stats["input_tokens"] = token_usage["input"]
+    stats["cached_tokens"] = token_usage["cached"]
     stats["output_tokens"] = token_usage["output"]
     stats["jobs"] = len(extracted["jobs"])
 
     print(
         f"  AI: {stats['jobs']} jobs | "
-        f"tokens in={stats['input_tokens']} out={stats['output_tokens']}"
+        f"tokens in={stats['input_tokens']} cached={stats['cached_tokens']} "
+        f"out={stats['output_tokens']}"
     )
 
     if not extracted["jobs"]:
@@ -333,6 +368,7 @@ async def main():
                     "ai": "UNKNOWN",
                     "jobs": 0,
                     "input_tokens": None,
+                    "cached_tokens": None,
                     "output_tokens": None,
                     "created": 0,
                     "updated": 0,
