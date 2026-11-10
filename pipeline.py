@@ -393,9 +393,13 @@ async def process_site(crawler, site, config):
     current_candidates = {item["url"]: item for item in candidates}
     current_urls = set(current_candidates)
 
+    def previous_hash(value):
+        # Support both the old state format (hash string) and the new format.
+        return value.get("hash") if isinstance(value, dict) else value
+
     new_or_changed = [
         item for item in candidates
-        if old_candidates.get(item["url"]) != item["content_hash"]
+        if previous_hash(old_candidates.get(item["url"])) != item["content_hash"]
     ]
 
     extracted = {"employer": site["name"], "jobs": []}
@@ -406,9 +410,32 @@ async def process_site(crawler, site, config):
         # Only changed listing snippets are sent to AI; unchanged jobs stay local.
         if new_or_changed:
             stats["ai"] = "YES"
-            snippets = "\n\n--- LISTING ---\n\n".join(
+
+            print("\\n  DEBUG: changed listing candidates")
+            for index, item in enumerate(new_or_changed, start=1):
+                previous = old_candidates.get(item["url"])
+                previous_content = (
+                    previous.get("content", "[Previous content not stored in old state]")
+                    if isinstance(previous, dict)
+                    else "[Previous content not stored in old state]"
+                )
+                previous_hash_value = previous_hash(previous) or "[none]"
+                print(f"\\n  [{index}] URL: {item['url']}")
+                print(f"      OLD HASH: {previous_hash_value}")
+                print(f"      NEW HASH: {item['content_hash']}")
+                print("      OLD CONTENT:")
+                print(previous_content)
+                print("      NEW CONTENT:")
+                print(item["content"])
+
+            snippets = "\\n\\n--- LISTING ---\\n\\n".join(
                 item["content"] for item in new_or_changed
             )
+            print("\\n  EXACT INPUT SENT TO AI:")
+            print("  " + "-" * 70)
+            print(snippets)
+            print("  " + "-" * 70)
+
             extracted, token_usage = extract_jobs(
                 snippets, site["url"], site["name"]
             )
@@ -447,7 +474,11 @@ async def process_site(crawler, site, config):
 
         # Update candidate hashes only after AI processing completed successfully.
         state["candidates"] = {
-            item["url"]: item["content_hash"] for item in candidates
+            item["url"]: {
+                "hash": item["content_hash"],
+                "content": item["content"],
+            }
+            for item in candidates
         }
 
     else:
