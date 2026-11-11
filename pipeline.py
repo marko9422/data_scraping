@@ -45,21 +45,23 @@ SYSTEM_PROMPT = """
 Extract current, specific job vacancies from the supplied website listing snippets.
 Return ONLY valid JSON with this schema:
 {
-  "employer": "employer name or Unknown",
   "jobs": [
     {
       "title": "job title",
       "url": "absolute job URL",
-      "location": "workplace address or locality, followed by the Swiss canton when reliably known; otherwise exactly \\"Neznáme\\"",
+      "location": "full street address or locality",
+      "canton": "Swiss canton name",
       "employment_type": "",
       "description": ""
     }
   ]
 }
 Rules:
-- Only actual vacancies, not navigation or general pages. Do not invent facts.
-- Use the listing content supplied for each job. If workplace or canton is not reliably present, use exactly "Neznáme".
-- For Swiss locations, append the canton when it is explicitly stated or can be identified confidently. Examples: "Stoos, Kanton Schwyz" or "Zürich, Kanton Zürich".
+- Only actual vacancies, not navigation, legal pages, cookie notices, or general pages. Do not invent facts.
+- Use a specific workplace address or locality from the listing when it is explicitly stated.
+- If the listing does not state a workplace address, use the default address supplied in the user message.
+- If the listing does not state a canton, use the default canton supplied in the user message.
+- Do not infer a different address or canton from unrelated page content.
 - Resolve relative links against the website URL supplied in the user message.
 - If no actual vacancies are present, return an empty jobs array.
 """
@@ -193,7 +195,7 @@ def save_job_state(path, state):
     )
 
 
-def extract_jobs(html, source_url, employer_hint):
+def extract_jobs(html, source_url, employer_hint, default_address="", default_canton=""):
     """Send only new/changed listing snippets to AI and return extracted jobs and usage."""
     response = ai.chat.completions.create(
         model=META_MODEL,
@@ -204,7 +206,9 @@ def extract_jobs(html, source_url, employer_hint):
                 "role": "user",
                 "content": (
                     f"Website URL: {source_url}\n"
-                    f"Employer hint: {employer_hint}\n\n"
+                    f"Employer: {employer_hint}\n"
+                    f"Default address: {default_address or 'Neznáme'}\n"
+                    f"Default canton: {default_canton or 'Neznáme'}\n\n"
                     f"Changed listing snippets:\n{html}"
                 ),
             },
@@ -243,6 +247,7 @@ def extract_jobs(html, source_url, employer_hint):
             raise ValueError("AI returned a job without title or URL")
         job["url"] = urljoin(source_url, job["url"])
 
+    data["employer"] = employer_hint
     return data, token_usage
 
 def wp_request(method, url=WP_BASE, **kwargs):
@@ -279,7 +284,9 @@ def get_wp_jobs():
 def sync_jobs(site, extracted, archive_urls=None):
     """Create/update supplied jobs and archive only explicitly confirmed removals."""
     source_url = site["url"]
-    employer = extracted.get("employer") or site["name"]
+    employer = site["name"]
+    default_address = site.get("address", "").strip()
+    default_canton = site.get("canton", "").strip()
     existing = get_wp_jobs()
 
     # Match posts by job URL, scoped to the current source website.
@@ -301,7 +308,8 @@ def sync_jobs(site, extracted, archive_urls=None):
             "acf": {
                 "job_title": job["title"],
                 "employer_name": employer,
-                "job_location": job.get("location", ""),
+                "job_location": job.get("location") or default_address or "Neznáme",
+                "canton": job.get("canton") or default_canton or "Neznáme",
                 "employment_type": job.get("employment_type", ""),
                 "job_description": job.get("description", ""),
                 "job_url": url,
@@ -486,7 +494,11 @@ async def process_site(crawler, site, config):
             print("  " + "-" * 70)
 
             extracted, token_usage = extract_jobs(
-                snippets, site["url"], site["name"]
+                snippets,
+                site["url"],
+                site["name"],
+                site.get("address", ""),
+                site.get("canton", ""),
             )
             stats["jobs"] = len(extracted["jobs"])
             stats["input_tokens"] = token_usage["input"]
@@ -536,7 +548,13 @@ async def process_site(crawler, site, config):
         if html_changed:
             print("  No listing blocks detected; using whole-page AI fallback.")
             stats["ai"] = "YES (fallback)"
-            extracted, token_usage = extract_jobs(cleaned, site["url"], site["name"])
+            extracted, token_usage = extract_jobs(
+                cleaned,
+                site["url"],
+                site["name"],
+                site.get("address", ""),
+                site.get("canton", ""),
+            )
             stats["jobs"] = len(extracted["jobs"])
             stats["input_tokens"] = token_usage["input"]
             stats["cached_tokens"] = token_usage["cached"]
