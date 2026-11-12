@@ -114,7 +114,7 @@ async def process_site(crawler, site, config, ai, model, wp_session):
         print("  SKIPPED - no changes.")
 
     print_stage(4, "WORDPRESS UPSERT", "Match by source_url and normalized job_url.")
-    active = analysis["new_jobs"] + analysis["updated_jobs"]
+    active = [dict(job, _change_type="new") for job in analysis["new_jobs"]] + [dict(job, _change_type="updated") for job in analysis["updated_jobs"]]
     result = sync_jobs(wp_session, WP_BASE, site, active)
     print(f"  Created: {result['created']} | Updated: {result['updated']} | Skipped: {result['skipped']}")
 
