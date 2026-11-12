@@ -1,5 +1,7 @@
-"""Shared URL helpers used by diff and WordPress synchronization."""
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+"""Shared URL normalization and page-presence helpers."""
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
+
+from bs4 import BeautifulSoup
 
 
 def normalize_url(url):
@@ -21,9 +23,14 @@ def normalize_url(url):
     ))
 
 
-def url_is_present(url, html):
-    """Check if the job detail URL still occurs in the current HTML."""
+def url_is_present(url, html, page_url):
+    """Resolve relative href values before checking whether a job URL remains."""
     target = normalize_url(url)
     if not target:
         return False
-    return target in html.replace("&amp;", "&")
+    soup = BeautifulSoup(html, "html.parser")
+    for link in soup.find_all("a", href=True):
+        candidate = normalize_url(urljoin(page_url, link["href"].strip()))
+        if candidate == target:
+            return True
+    return False
