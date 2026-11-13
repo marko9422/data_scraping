@@ -138,19 +138,8 @@ async def scrape_site(crawler, site, run_config, index, total):
 
         output_file.write_text(cleaned, encoding="utf-8")
 
-        original_size = len(html.encode("utf-8"))
-        cleaned_size = len(cleaned.encode("utf-8"))
-        reduction = (1 - cleaned_size / original_size) * 100 if original_size else 0
-        link_count = len(
-            BeautifulSoup(cleaned, "html.parser").find_all("a", href=True)
-        )
-
         log("✓ HTML úspešne uložené", Colors.GREEN)
         log(f"  Súbor: {output_file.relative_to(PROJECT_DIR)}")
-        log(f"  Pôvodná veľkosť: {original_size:,} B")
-        log(f"  Vyčistená veľkosť: {cleaned_size:,} B")
-        log(f"  Zmenšenie: {reduction:.1f}%")
-        log(f"  Zachované odkazy: {link_count}")
 
         return True
 
