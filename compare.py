@@ -1,20 +1,8 @@
 """
-compare.py — porovnávanie starého a nového HTML súboru.
+compare.py — porovnávanie starého a nového HTML.
 
-Predvolené súbory:
-- scrape_output/stoos-hotel.html      (nový HTML)
-- scrape_output/stoos-hotel-old.html  (starý HTML)
-
-Vypíše:
-1. Riadky pridané v novom súbore.
-2. Riadky odstránené oproti starému súboru.
-3. Súhrn počtu pridaných a odstránených riadkov.
-
-Spustenie:
-    python compare.py
-
-Voliteľne možno zadať vlastné názvy súborov:
-    python compare.py novy.html stary.html
+Funkcia get_diff() vracia štruktúrovaný diff pre ďalšie moduly.
+Spustenie z terminálu stále vypíše pridané a odstránené riadky.
 """
 
 import sys
@@ -41,36 +29,41 @@ def log(message, color=Colors.RESET):
     print(f"{color}{message}{Colors.RESET}")
 
 
-def compare_files(new_file, old_file):
-    """Porovná dva textové súbory a vypíše pridané a odstránené riadky."""
+def get_diff(new_file, old_file):
+    """Vráti pridané/odstránené riadky a štatistiky; pri chybe vyhodí výnimku."""
     if not new_file.exists():
-        log(f"CHYBA: Nový súbor neexistuje: {new_file}", Colors.RED)
-        return False
-
+        raise FileNotFoundError(f"Nový HTML súbor neexistuje: {new_file}")
     if not old_file.exists():
-        log(f"CHYBA: Starý súbor neexistuje: {old_file}", Colors.RED)
-        return False
+        raise FileNotFoundError(f"Starý HTML súbor neexistuje: {old_file}")
 
     new_lines = new_file.read_text(encoding="utf-8").splitlines()
     old_lines = old_file.read_text(encoding="utf-8").splitlines()
-
     matcher = SequenceMatcher(None, old_lines, new_lines, autojunk=False)
 
-    added = []
-    removed = []
-
+    added, removed = [], []
     for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
         if tag in ("replace", "delete"):
-            for line_number, line in enumerate(
-                old_lines[old_start:old_end], start=old_start + 1
-            ):
-                removed.append((line_number, line))
-
+            removed.extend(
+                (line_number, line)
+                for line_number, line in enumerate(old_lines[old_start:old_end], start=old_start + 1)
+            )
         if tag in ("replace", "insert"):
-            for line_number, line in enumerate(
-                new_lines[new_start:new_end], start=new_start + 1
-            ):
-                added.append((line_number, line))
+            added.extend(
+                (line_number, line)
+                for line_number, line in enumerate(new_lines[new_start:new_end], start=new_start + 1)
+            )
+
+    return {
+        "added": added,
+        "removed": removed,
+        "old_lines": len(old_lines),
+        "new_lines": len(new_lines),
+    }
+
+
+def compare_files(new_file, old_file):
+    """Porovná súbory, vypíše diff a vráti jeho štruktúrované dáta."""
+    diff = get_diff(new_file, old_file)
 
     log("\n" + "=" * 70, Colors.BLUE)
     log("POROVNANIE HTML SÚBOROV", Colors.BOLD + Colors.BLUE)
@@ -79,50 +72,41 @@ def compare_files(new_file, old_file):
     log(f"STARÝ súbor: {old_file.name}", Colors.YELLOW)
 
     log("\n" + "-" * 70, Colors.GREEN)
-    log(f"PRIDANÉ V NOVOM SÚBORE: {len(added)} riadkov", Colors.BOLD + Colors.GREEN)
+    log(f"PRIDANÉ V NOVOM SÚBORE: {len(diff['added'])} riadkov", Colors.BOLD + Colors.GREEN)
     log("-" * 70, Colors.GREEN)
-
-    if added:
-        for line_number, line in added:
+    if diff["added"]:
+        for line_number, line in diff["added"]:
             log(f"+ [{line_number}] {line}", Colors.GREEN)
     else:
         log("Žiadne pridané riadky.", Colors.GRAY)
 
     log("\n" + "-" * 70, Colors.RED)
-    log(f"ODSTRÁNENÉ OPROTI STARÉMU SÚBORU: {len(removed)} riadkov", Colors.BOLD + Colors.RED)
+    log(f"ODSTRÁNENÉ OPROTI STARÉMU SÚBORU: {len(diff['removed'])} riadkov", Colors.BOLD + Colors.RED)
     log("-" * 70, Colors.RED)
-
-    if removed:
-        for line_number, line in removed:
+    if diff["removed"]:
+        for line_number, line in diff["removed"]:
             log(f"- [{line_number}] {line}", Colors.RED)
     else:
         log("Žiadne odstránené riadky.", Colors.GRAY)
 
     log("\n" + "=" * 70, Colors.BLUE)
     log("SÚHRN", Colors.BOLD + Colors.BLUE)
-    log(f"Pridané riadky:     {len(added)}", Colors.GREEN)
-    log(f"Odstránené riadky:  {len(removed)}", Colors.RED)
-    log(f"Starý súbor:        {len(old_lines)} riadkov")
-    log(f"Nový súbor:         {len(new_lines)} riadkov")
+    log(f"Pridané riadky:     {len(diff['added'])}", Colors.GREEN)
+    log(f"Odstránené riadky:  {len(diff['removed'])}", Colors.RED)
+    log(f"Starý súbor:        {diff['old_lines']} riadkov")
+    log(f"Nový súbor:         {diff['new_lines']} riadkov")
     log("=" * 70 + "\n", Colors.BLUE)
-
-    return True
+    return diff
 
 
 def main():
-    """Načíta názvy súborov z argumentov alebo použije predvolené názvy."""
     if len(sys.argv) > 3:
         log("Použitie: python compare.py [novy_subor.html] [stary_subor.html]", Colors.YELLOW)
         raise SystemExit(2)
 
-    new_name = sys.argv[1] if len(sys.argv) >= 2 else "stoos-hotel.html"
-    old_name = sys.argv[2] if len(sys.argv) >= 3 else "stoos-hotel-old.html"
-
-    new_file = OUTPUT_DIR / new_name
-    old_file = OUTPUT_DIR / old_name
-
-    if not compare_files(new_file, old_file):
-        raise SystemExit(1)
+    new_name = sys.argv[1] if len(sys.argv) >= 2 else "stoos-hotels.html"
+    old_name = sys.argv[2] if len(sys.argv) >= 3 else "stoos-hotels-old.html"
+    compare_files(OUTPUT_DIR / new_name, OUTPUT_DIR / old_name)
 
 
 if __name__ == "__main__":
