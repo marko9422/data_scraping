@@ -230,9 +230,12 @@ def call_ai(user_content):
     return client.chat.completions.create(
         model=META_MODEL,
         messages=[
+            # Keep the unchanged system prompt first for Meta's automatic prefix cache.
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
+        # Stable across requests using this extraction prompt.
+        extra_body={"prompt_cache_key": "data-scraping-job-extraction-v1"},
         temperature=0,
         max_tokens=4000,
     )
@@ -248,6 +251,13 @@ def main():
         log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
         if stats["mode"] == "DIFF":
             log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
+
+            # Skip identical snapshots: there is no new content for the model to inspect.
+            if stats["added"] == 0 and stats["removed"] == 0:
+                log("\\nNo HTML changes detected. Meta AI was not called.", Colors.GREEN)
+                log("No new vacancies to process. Existing data is left unchanged.", Colors.YELLOW)
+                log("WordPress API: NOT CALLED.", Colors.YELLOW)
+                return
         log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
         print(SYSTEM_PROMPT.strip())
         log("\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
