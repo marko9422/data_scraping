@@ -26,6 +26,7 @@ SITE_SLUG = "stoos-hotels"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
+BUILD_VERSION = "meta-diff-v2"
 
 
 class Colors:
@@ -142,7 +143,10 @@ def prepare_input(site):
         "new_lines": diff["new_lines"],
     }
 
-    if not added and not removed:
+    # The ONLY condition that skips Meta AI is an identical HTML snapshot.
+    # Never filter or classify changed lines in Python: every non-empty diff
+    # (added and/or removed) must be sent to Meta AI for semantic analysis.
+    if len(added) == 0 and len(removed) == 0:
         return None, stats
 
     content = (
@@ -262,13 +266,14 @@ def main():
 
         log("=" * 78, Colors.BLUE)
         log("META AI REQUEST — DIFF AND ACF JSON PREVIEW", Colors.BOLD + Colors.BLUE)
+        log(f"BUILD VERSION: {BUILD_VERSION}", Colors.BOLD + Colors.GREEN)
         log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
 
         if stats["mode"] == "DIFF":
             log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
             if user_content is None:
-                log("\nNo HTML changes detected. Meta AI was not called.", Colors.GREEN)
-                log("No vacancy changes to process.", Colors.YELLOW)
+                log("\nHTML snapshots are identical (empty diff). Meta AI was not called.", Colors.GREEN)
+                log("No changed content to analyze.", Colors.YELLOW)
                 log("WordPress API: NOT CALLED.", Colors.YELLOW)
                 return
 
