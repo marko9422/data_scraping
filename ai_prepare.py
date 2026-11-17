@@ -1,268 +1,277 @@
 """
-ai_prepare.py — príprava obsahu, ktorý neskôr odošleme do AI.
-
-Zatiaľ NEVYKONÁVA žiadne API volanie. Iba pripraví a farebne vypíše
-system prompt a používateľský obsah, ktorý by sa odoslal do AI.
-
-Testovacie súbory:
-- scrape_output/stoos-hotels.html      (nový HTML)
-- scrape_output/stoos-hotels-old.html  (starý HTML)
-
-Správanie:
-- Ak starý súbor neexistuje, pripraví celý nový HTML súbor.
-- Ak starý súbor existuje, pripraví rozdiely podľa logiky compare.py:
-  ADDED = zelené, nové riadky
-  REMOVED = červené, riadky zo starého súboru, ktoré v novom chýbajú
-
-Spustenie:
-    python ai_prepare.py
+Meta AI job extraction and ACF JSON preview. No WordPress API calls.
 """
 
 import json
+import os
+import re
+from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import urljoin
 
+from dotenv import load_dotenv
+from openai import OpenAI
 
-PROJECT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = PROJECT_DIR / "scrape_output"
-SITES_FILE = PROJECT_DIR / "sites.json"
-
-NEW_FILE = OUTPUT_DIR / "stoos-hotels.html"
-OLD_FILE = OUTPUT_DIR / "stoos-hotels-old.html"
+load_dotenv()
+ROOT = Path(__file__).resolve().parent
+OUTPUT = ROOT / "scrape_output"
+SITES_FILE = ROOT / "sites.json"
+NEW_FILE = OUTPUT / "stoos-hotels.html"
+OLD_FILE = OUTPUT / "stoos-hotels-old.html"
 SITE_SLUG = "stoos-hotels"
+META_API_KEY = os.getenv("META_API_KEY")
+META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
+UNAVAILABLE = "Unavailable"
 
 
 class Colors:
     RESET = "\033[0m"
-    BOLD = "\033[1m"
     BLUE = "\033[94m"
     CYAN = "\033[96m"
     GREEN = "\033[92m"
     RED = "\033[91m"
     YELLOW = "\033[93m"
-    GRAY = "\033[90m"
+    BOLD = "\033[1m"
 
 
 def log(message="", color=Colors.RESET):
     print(f"{color}{message}{Colors.RESET}")
 
 
-# Prompt structure copied and adapted from pipeline.py on
-# feature/incremental-job-detection. No AI client is initialized here.
 SYSTEM_PROMPT = """
 Extract current, specific job vacancies from the supplied website content.
-Return ONLY valid JSON with this schema:
+Return ONLY valid JSON, without Markdown fences or explanations, using this schema:
+
 {
   "jobs": [
     {
-      "title": "job title",
-      "url": "absolute job URL",
-      "employment_type": "",
-      "description": ""
+      "job_title": "Job title",
+      "employer_name": "Employer name",
+      "job_location": "Workplace address",
+      "employment_type": "Employment type",
+      "job_description": "Job description",
+      "job_url": "Absolute job URL",
+      "source_url": "Source website URL",
+      "scraped_at": "YYYY-MM-DD",
+      "canton": "Swiss canton",
+      "scope": "Employer scope/category",
+      "employer_slug": "Employer slug"
     }
   ]
 }
 
-Rules:
-- Extract only actual, currently available job vacancies.
-- Do not return navigation links, legal pages, cookie notices, or general pages.
-- Do not invent facts or fill in details that are not supported by the supplied content.
-- Resolve relative links against the website URL supplied in the user message.
-- Employer name, employer slug, workplace address, and canton are supplied manually
-  from sites.json. Never extract or return these fields from the HTML.
-- Do not include employer, slug, address, location, or canton in the JSON response.
-- If the input is marked FULL_PAGE, inspect the complete page for current vacancies.
-- If the input contains ADDED and REMOVED sections:
-  - ADDED means content present in the new HTML. Use this as the primary source
-    when identifying new or changed job offers.
-  - REMOVED means content present only in the old HTML. It is shown for comparison
-    and context only. NEVER report a vacancy based only on REMOVED content.
-  - A removed section does not automatically prove that a job has closed.
-  - Do not treat technical HTML changes, formatting changes, or unrelated text
-    as a new job vacancy.
-- If no actual current vacancies can be identified, return an empty jobs array.
+The user message provides trusted employer metadata from sites.json.
+Copy these fields exactly from that metadata: employer_name, job_location,
+source_url, canton, scope, employer_slug. Do not infer or modify them.
+Copy scraped_at from the supplied metadata too.
+You extract only job_title, employment_type, job_description, and job_url.
+If any AI-owned field is unknown, use exactly "Unavailable" (English).
+Do not invent facts. job_url must be absolute; resolve relative links against source_url.
+Extract only actual current vacancies, not navigation or general pages.
+Return one object per distinct vacancy, without duplicates.
+If there are no current vacancies, return {"jobs": []}.
+
+For FULL_PAGE input, inspect the complete new HTML.
+For DIFF input, ADDED lines belong to the new HTML and REMOVED lines only to the old HTML.
+Use ADDED as primary evidence. Never report a vacancy based only on REMOVED content.
+A removed line alone does not prove that a vacancy has closed.
+Ignore formatting and unrelated technical HTML changes.
 """
 
 
-def load_site_metadata():
-    """Načíta všetky manuálne údaje o zamestnávateľovi zo sites.json."""
+def load_site():
     if not SITES_FILE.exists():
-        return {
-            "name": "Stoos Hotels",
-            "url": "https://stoos-hotels.ch/karriere/",
-            "address": "",
-            "canton": "",
-        }
-
+        raise FileNotFoundError(f"Missing config: {SITES_FILE}")
     sites = json.loads(SITES_FILE.read_text(encoding="utf-8"))
     for site in sites:
         if site.get("slug") == SITE_SLUG:
             return site
-
-    return {
-        "name": "Stoos Hotels",
-        "url": "https://stoos-hotels.ch/karriere/",
-        "address": "",
-        "canton": "",
-    }
+    raise ValueError(f"Employer slug not found in sites.json: {SITE_SLUG}")
 
 
-def build_diff(old_text, new_text):
-    """Vytvorí ADDED a REMOVED riadky rovnakou logikou ako compare.py."""
-    old_lines = old_text.splitlines()
-    new_lines = new_text.splitlines()
+def value_or_unavailable(value):
+    return str(value).strip() if value is not None and str(value).strip() else UNAVAILABLE
 
+
+def make_diff(old_text, new_text):
+    old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
     matcher = SequenceMatcher(None, old_lines, new_lines, autojunk=False)
-    added = []
-    removed = []
-
-    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+    added, removed = [], []
+    for tag, a, b, c, d in matcher.get_opcodes():
         if tag in ("replace", "delete"):
-            for number, line in enumerate(
-                old_lines[old_start:old_end], start=old_start + 1
-            ):
-                removed.append((number, line))
-
+            removed.extend((i, line) for i, line in enumerate(old_lines[a:b], a + 1))
         if tag in ("replace", "insert"):
-            for number, line in enumerate(
-                new_lines[new_start:new_end], start=new_start + 1
-            ):
-                added.append((number, line))
-
+            added.extend((i, line) for i, line in enumerate(new_lines[c:d], c + 1))
     return added, removed, len(old_lines), len(new_lines)
 
 
-def format_diff_section(title, items, marker):
-    """Vytvorí textovú sekciu pre obsah určený AI."""
-    if not items:
-        return f"{title}\n(none)"
-
-    lines = [title]
-    lines.extend(f"{marker} [line {number}] {line}" for number, line in items)
-    return "\n".join(lines)
+def diff_section(title, rows, marker):
+    if not rows:
+        return title + "\n(none)"
+    return "\n".join([title] + [f"{marker} [line {n}] {line}" for n, line in rows])
 
 
-def prepare_input():
-    """Pripraví system prompt a user input bez odoslania do AI."""
+def prepare_input(site):
     if not NEW_FILE.exists():
-        raise FileNotFoundError(f"Nový HTML súbor neexistuje: {NEW_FILE}")
-
+        raise FileNotFoundError(f"New HTML file not found: {NEW_FILE}")
     new_html = NEW_FILE.read_text(encoding="utf-8")
-    site = load_site_metadata()
-
-    metadata = (
-        f"Website URL: {site.get('url', '')}\n"
-        f"Employer name (manual, do not extract): {site.get('name', 'Stoos Hotels')}\n"
-        f"Employer slug (manual, do not extract): {site.get('slug', SITE_SLUG)}\n"
-        f"Workplace address (manual, do not extract): {site.get('address') or 'Neznáme'}\n"
-        f"Canton (manual, do not extract): {site.get('canton') or 'Neznáme'}\n"
-        f"New HTML file: {NEW_FILE.name}\n"
-        f"Old HTML file: {OLD_FILE.name}\n"
-    )
+    source_url = value_or_unavailable(site.get("url"))
+    metadata = {
+        "employer_name": value_or_unavailable(site.get("name")),
+        "job_location": value_or_unavailable(site.get("address")),
+        "source_url": source_url,
+        "canton": value_or_unavailable(site.get("canton")),
+        "scope": value_or_unavailable(site.get("scope")),
+        "employer_slug": value_or_unavailable(site.get("slug")),
+        "scraped_at": date.today().isoformat(),
+    }
+    meta_json = json.dumps(metadata, ensure_ascii=False, indent=2)
 
     if not OLD_FILE.exists():
-        mode = "FULL_PAGE"
-        user_content = (
-            f"{metadata}\n"
-            "CHANGE MODE: FULL_PAGE\n"
-            "The old HTML file does not exist. This is the first scan.\n"
-            "Analyze the complete new HTML page below.\n\n"
-            f"=== FULL_PAGE: NEW HTML ===\n{new_html}"
+        content = (
+            "INPUT MODE: FULL_PAGE\n"
+            "First scan: inspect the complete current HTML.\n\n"
+            f"EMPLOYER METADATA (copy exactly):\n{meta_json}\n\n"
+            f"=== FULL_PAGE: NEW HTML ({NEW_FILE.name}) ===\n{new_html}"
         )
-        stats = {
-            "mode": mode,
-            "added": None,
-            "removed": None,
-            "old_lines": 0,
-            "new_lines": len(new_html.splitlines()),
-        }
-        return user_content, stats
+        return content, {"mode": "FULL_PAGE", "new_lines": len(new_html.splitlines())}
 
     old_html = OLD_FILE.read_text(encoding="utf-8")
-    added, removed, old_count, new_count = build_diff(old_html, new_html)
-
-    user_content = (
-        f"{metadata}\n"
-        "CHANGE MODE: DIFF\n"
-        "Compare the old and new HTML content using the sections below.\n"
-        "ADDED lines belong to the NEW HTML.\n"
-        "REMOVED lines belong only to the OLD HTML.\n\n"
-        f"{format_diff_section('=== ADDED: NEW CONTENT ===', added, '+')}\n\n"
-        f"{format_diff_section('=== REMOVED: OLD CONTENT ===', removed, '-')}"
+    added, removed, old_count, new_count = make_diff(old_html, new_html)
+    content = (
+        "INPUT MODE: DIFF\n"
+        "Extract current vacancies from new content; removed content is context only.\n\n"
+        f"EMPLOYER METADATA (copy exactly):\n{meta_json}\n\n"
+        f"{diff_section('=== ADDED: NEW CONTENT ===', added, '+')}\n\n"
+        f"{diff_section('=== REMOVED: OLD CONTENT ===', removed, '-')}"
     )
-
-    stats = {
-        "mode": "DIFF",
-        "added": len(added),
-        "removed": len(removed),
-        "old_lines": old_count,
-        "new_lines": new_count,
-        "added_items": added,
-        "removed_items": removed,
+    return content, {
+        "mode": "DIFF", "added": len(added), "removed": len(removed),
+        "old_lines": old_count, "new_lines": new_count,
     }
-    return user_content, stats
 
 
-def print_prepared_input(user_content, stats):
-    """Farebne zobrazí pripravený AI prompt a presný používateľský vstup."""
-    log("\n" + "=" * 76, Colors.BLUE)
-    log("PRÍPRAVA VSTUPU PRE AI — TESTOVACÍ REŽIM", Colors.BOLD + Colors.BLUE)
-    log("=" * 76, Colors.BLUE)
-    log("AI API: NEPOUŽÍVA SA", Colors.YELLOW)
-    log(f"Režim: {stats['mode']}", Colors.CYAN)
+def parse_json(raw):
+    text = raw.strip()
+    fence = chr(96) * 3
+    if text.startswith(fence):
+        text = re.sub(r"^" + re.escape(fence) + r"(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*" + re.escape(fence) + r"$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(text[start:end + 1])
 
-    if stats["mode"] == "FULL_PAGE":
-        log(f"Nový HTML: {stats['new_lines']} riadkov", Colors.GREEN)
-        log("Starý HTML: neexistuje — pripravuje sa celý nový súbor.", Colors.YELLOW)
-    else:
-        log(f"Starý HTML: {stats['old_lines']} riadkov", Colors.GRAY)
-        log(f"Nový HTML:  {stats['new_lines']} riadkov", Colors.GRAY)
-        log(f"ADDED:      {stats['added']} riadkov", Colors.GREEN)
-        log(f"REMOVED:    {stats['removed']} riadkov", Colors.RED)
 
-    log("\n" + "-" * 76, Colors.CYAN)
-    log("SYSTEM PROMPT — INŠTRUKCIE PRE AI", Colors.BOLD + Colors.CYAN)
-    log("-" * 76, Colors.CYAN)
-    print(SYSTEM_PROMPT.strip())
+def build_acf_json(data, site):
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        raise ValueError('AI response must contain a "jobs" array.')
 
-    log("\n" + "-" * 76, Colors.CYAN)
-    log("USER INPUT — PRESNÝ OBSAH PRIPRAVENÝ PRE AI", Colors.BOLD + Colors.CYAN)
-    log("-" * 76, Colors.CYAN)
+    source_url = value_or_unavailable(site.get("url"))
+    manual = {
+        "employer_name": value_or_unavailable(site.get("name")),
+        "job_location": value_or_unavailable(site.get("address")),
+        "source_url": source_url,
+        "canton": value_or_unavailable(site.get("canton")),
+        "scope": value_or_unavailable(site.get("scope")),
+        "employer_slug": value_or_unavailable(site.get("slug")),
+    }
 
-    if stats["mode"] == "FULL_PAGE":
-        print(user_content)
-    else:
-        sections = user_content.split("\n\n=== ADDED: NEW CONTENT ===\n", 1)
-        print(sections[0])
+    jobs = []
+    for number, item in enumerate(data["jobs"], 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Job #{number} is not an object.")
+        url = value_or_unavailable(item.get("job_url"))
+        if url != UNAVAILABLE:
+            url = urljoin(source_url, url)
 
-        log("\n=== ADDED: NEW CONTENT ===", Colors.GREEN)
-        if stats["added_items"]:
-            for number, line in stats["added_items"]:
-                log(f"+ [line {number}] {line}", Colors.GREEN)
-        else:
-            log("(none)", Colors.GRAY)
+        # Metadata fields are overwritten locally from sites.json,
+        # so the AI cannot accidentally change these trusted values.
+        jobs.append({
+            "job_title": value_or_unavailable(item.get("job_title")),
+            **manual,
+            "employment_type": value_or_unavailable(item.get("employment_type")),
+            "job_description": value_or_unavailable(item.get("job_description")),
+            "job_url": url,
+            "scraped_at": date.today().isoformat(),
+        })
+    return {"jobs": jobs}
 
-        log("\n=== REMOVED: OLD CONTENT ===", Colors.RED)
-        if stats["removed_items"]:
-            for number, line in stats["removed_items"]:
-                log(f"- [line {number}] {line}", Colors.RED)
-        else:
-            log("(none)", Colors.GRAY)
 
-    log("\n" + "=" * 76, Colors.BLUE)
-    log("KONIEC — NIČ NEBOLO ODOSLANÉ DO AI", Colors.BOLD + Colors.YELLOW)
-    log("=" * 76 + "\n", Colors.BLUE)
+def print_token_usage(usage):
+    if usage is None:
+        log("Token usage unavailable from API.", Colors.YELLOW)
+        return
+    input_tokens = getattr(usage, "prompt_tokens", None)
+    if input_tokens is None:
+        input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "completion_tokens", None)
+    if output_tokens is None:
+        output_tokens = getattr(usage, "output_tokens", None)
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details else None
+    log("\nTOKEN USAGE", Colors.BOLD + Colors.CYAN)
+    log(f"Input tokens:  {input_tokens if input_tokens is not None else UNAVAILABLE}")
+    log(f"Output tokens: {output_tokens if output_tokens is not None else UNAVAILABLE}")
+    if cached is not None:
+        log(f"Cached input:  {cached}")
+    if input_tokens is not None and output_tokens is not None:
+        log(f"Total tokens:  {input_tokens + output_tokens}")
+
+
+def call_ai(user_content):
+    if not META_API_KEY:
+        raise RuntimeError("META_API_KEY missing from .env")
+    client = OpenAI(base_url="https://api.meta.ai/v1", api_key=META_API_KEY)
+    return client.chat.completions.create(
+        model=META_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0,
+        max_tokens=4000,
+    )
 
 
 def main():
     try:
-        user_content, stats = prepare_input()
-        print_prepared_input(user_content, stats)
-    except FileNotFoundError as error:
-        log(f"CHYBA: {error}", Colors.RED)
+        site = load_site()
+        user_content, stats = prepare_input(site)
+
+        log("=" * 78, Colors.BLUE)
+        log("META AI REQUEST — EXACT PROMPT AND PAYLOAD", Colors.BOLD + Colors.BLUE)
+        log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
+        if stats["mode"] == "DIFF":
+            log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
+        log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
+        print(SYSTEM_PROMPT.strip())
+        log("\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
+        print(user_content)
+
+        log("\nCalling Meta AI...", Colors.YELLOW)
+        response = call_ai(user_content)
+        print_token_usage(getattr(response, "usage", None))
+
+        raw = response.choices[0].message.content or ""
+        log("\n--- RAW AI OUTPUT ---", Colors.CYAN)
+        print(raw)
+
+        final_data = build_acf_json(parse_json(raw), site)
+        log("\n--- FINAL JSON: COMPLETE ACF FIELDS ---", Colors.BOLD + Colors.GREEN)
+        print(json.dumps(final_data, ensure_ascii=False, indent=2))
+        log(f"\nJobs found: {len(final_data['jobs'])}", Colors.GREEN)
+        log("WordPress API: NOT CALLED. Nothing was sent to WordPress.", Colors.YELLOW)
+
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, RuntimeError) as error:
+        log(f"ERROR: {error}", Colors.RED)
         raise SystemExit(1)
-    except (OSError, json.JSONDecodeError) as error:
-        log(f"CHYBA pri čítaní súborov alebo konfigurácie: {error}", Colors.RED)
+    except Exception as error:
+        log(f"AI/API error: {error}", Colors.RED)
         raise SystemExit(1)
 
 
