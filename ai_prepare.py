@@ -26,7 +26,7 @@ SITE_SLUG = "stoos-hotels"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
-BUILD_VERSION = "meta-diff-v4"
+BUILD_VERSION = "meta-diff-v5"
 
 
 class Colors:
@@ -242,6 +242,7 @@ def call_ai(user_content):
         ],
         extra_body={"prompt_cache_key": "data-scraping-job-extraction-v2"},
         temperature=0,
+        reasoning_effort="minimal",
         max_tokens=2000,
     )
 
