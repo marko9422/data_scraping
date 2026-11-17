@@ -1,17 +1,20 @@
 """
-Meta AI job extraction and ACF JSON preview. No WordPress API calls.
+Meta AI job change detection and ACF JSON preview.
+
+This script only prints JSON. It never calls the WordPress API.
 """
 
 import json
 import os
 import re
 from datetime import date
-from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urljoin
 
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from compare import get_diff
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parent
@@ -40,26 +43,46 @@ def log(message="", color=Colors.RESET):
 
 
 SYSTEM_PROMPT = """
-Extract job vacancies from the supplied website content.
-Return ONLY valid JSON using this schema:
+You identify job vacancy changes by comparing the ADDED content from the new HTML
+with the REMOVED content from the old HTML.
+
+Return ONLY valid JSON with this exact top-level schema:
 {
-  "jobs": [{"job_title":"...", "employer_name":"...", "job_location":"...", "employment_type":"...", "job_description":"...", "job_url":"...", "source_url":"...", "scraped_at":"YYYY-MM-DD", "canton":"...", "scope":"...", "employer_slug":"..."}],
-  "removed_jobs": [{"job_title":"...", "job_url":"..."}]
+  "changes": [
+    {
+      "action": "create",
+      "job_title": "...",
+      "employment_type": "...",
+      "job_description": "...",
+      "job_url": "..."
+    },
+    {
+      "action": "delete",
+      "job_title": "...",
+      "job_url": "..."
+    }
+  ]
 }
 
-Copy employer_name, job_location, source_url, canton, scope, employer_slug and scraped_at exactly from EMPLOYER METADATA for each item in jobs.
-Extract job_title, employment_type, job_description and job_url for current jobs. Unknown values must be "Unavailable". Resolve relative URLs against source_url. Do not invent facts or include navigation links.
-
-FULL_PAGE: extract all current vacancies into jobs and return removed_jobs as [].
-
-DIFF:
-- Extract actual current/new vacancies from ADDED into jobs.
-- REMOVED belongs to the old page. If a clearly identifiable vacancy listing (job title and/or its job link) was removed, return it in removed_jobs.
-- Never put a removed-only vacancy into jobs.
-- removed_jobs contains only job_title and job_url; use "Unavailable" if unavailable.
-- Ignore removed navigation links and unrelated HTML.
-- A removed item is only a deletion candidate. The application verifies its URL against the complete new HTML before any future WordPress action.
-Return empty arrays when there are no matching items.
+Rules:
+- A vacancy present in ADDED (new HTML) but absent from REMOVED (old HTML)
+  is a new vacancy: return action "create".
+- A vacancy present in REMOVED (old HTML) but absent from ADDED (new HTML)
+  is a removed vacancy: return action "delete".
+- A vacancy represented in both sides is unchanged; do not return it.
+- Compare vacancy identity using job URL first, then a sufficiently clear job title.
+- Interpret the complete diff, including BOTH ADDED and REMOVED sections.
+- Do not assume that every removed HTML line is a removed vacancy. Ignore
+  formatting, navigation, tracking, unrelated text, and other non-vacancy changes.
+- If a job link or title is split across multiple diff lines, interpret the lines
+  together using the surrounding diff context.
+- For "create", return job_title, employment_type, job_description and job_url.
+  Use "Unavailable" for unknown values. Resolve relative job URLs against source_url.
+- For "delete", return job_title and job_url. Use "Unavailable" only if a value
+  genuinely cannot be determined from the diff.
+- Do not return full ACF employer metadata; it is supplied locally by the script.
+- Do not invent vacancies or facts.
+- If no vacancy was added or removed, return {"changes": []}.
 """
 
 
@@ -77,51 +100,20 @@ def value_or_unavailable(value):
     return str(value).strip() if value is not None and str(value).strip() else UNAVAILABLE
 
 
-def make_diff(old_text, new_text):
-    old_lines, new_lines = old_text.splitlines(), new_text.splitlines()
-    matcher = SequenceMatcher(None, old_lines, new_lines, autojunk=False)
-    added, removed = [], []
-    for tag, a, b, c, d in matcher.get_opcodes():
-        if tag in ("replace", "delete"):
-            removed.extend((i, line) for i, line in enumerate(old_lines[a:b], a + 1))
-        if tag in ("replace", "insert"):
-            added.extend((i, line) for i, line in enumerate(new_lines[c:d], c + 1))
-    return added, removed, len(old_lines), len(new_lines)
-
-
 def diff_section(title, rows, marker):
     if not rows:
         return title + "\n(none)"
-    return "\n".join([title] + [f"{marker} [line {n}] {line}" for n, line in rows])
-
-def extract_removed_jobs(removed_rows, new_html, source_url):
-    """Find removed vacancy anchors and verify their URLs are absent from new HTML."""
-    from html import unescape
-
-    removed_html = "\n".join(line for _, line in removed_rows)
-    pattern = re.compile(r"""<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>""", re.I | re.S)
-    found = {}
-    for match in pattern.finditer(removed_html):
-        raw_url, anchor_text = match.groups()
-        absolute_url = urljoin(source_url, unescape(raw_url.strip()))
-        if absolute_url in new_html or unescape(raw_url.strip()) in new_html:
-            continue
-        title = re.sub(r"<[^>]+>", " ", anchor_text)
-        title = " ".join(unescape(title).split()) or UNAVAILABLE
-        found[absolute_url] = {"job_title": title, "job_url": absolute_url}
-    return list(found.values())
-
+    return "\n".join([title] + [f"{marker} [line {number}] {line}" for number, line in rows])
 
 
 def prepare_input(site):
     if not NEW_FILE.exists():
         raise FileNotFoundError(f"New HTML file not found: {NEW_FILE}")
-    new_html = NEW_FILE.read_text(encoding="utf-8")
-    source_url = value_or_unavailable(site.get("url"))
+
     metadata = {
         "employer_name": value_or_unavailable(site.get("name")),
         "job_location": value_or_unavailable(site.get("address")),
-        "source_url": source_url,
+        "source_url": value_or_unavailable(site.get("url")),
         "canton": value_or_unavailable(site.get("canton")),
         "scope": value_or_unavailable(site.get("scope")),
         "employer_slug": value_or_unavailable(site.get("slug")),
@@ -130,30 +122,39 @@ def prepare_input(site):
     meta_json = json.dumps(metadata, ensure_ascii=False, indent=2)
 
     if not OLD_FILE.exists():
+        new_html = NEW_FILE.read_text(encoding="utf-8")
         content = (
-            "INPUT MODE: FULL_PAGE\n"
-            "First scan: inspect the complete current HTML.\n\n"
-            f"EMPLOYER METADATA (copy exactly):\n{meta_json}\n\n"
-            f"=== FULL_PAGE: NEW HTML ({NEW_FILE.name}) ===\n{new_html}"
+            "INPUT MODE: FIRST_SCAN\n"
+            "There is no previous HTML snapshot. Identify every current job vacancy "
+            "in the new HTML and return each as action=create.\n\n"
+            f"EMPLOYER METADATA (reference only):\n{meta_json}\n\n"
+            f"=== CURRENT NEW HTML ({NEW_FILE.name}) ===\n{new_html}"
         )
-        return content, {"mode": "FULL_PAGE", "new_lines": len(new_html.splitlines())}
+        return content, {"mode": "FIRST_SCAN", "added": None, "removed": None}
 
-    old_html = OLD_FILE.read_text(encoding="utf-8")
-    added, removed, old_count, new_count = make_diff(old_html, new_html)
+    diff = get_diff(NEW_FILE, OLD_FILE)
+    added, removed = diff["added"], diff["removed"]
+    stats = {
+        "mode": "DIFF",
+        "added": len(added),
+        "removed": len(removed),
+        "old_lines": diff["old_lines"],
+        "new_lines": diff["new_lines"],
+    }
+
+    if not added and not removed:
+        return None, stats
+
     content = (
         "INPUT MODE: DIFF\n"
-        "Extract current vacancies from new content; removed content is context only.\n\n"
-        f"EMPLOYER METADATA (copy exactly):\n{meta_json}\n\n"
-        f"{diff_section('=== ADDED: NEW CONTENT ===', added, '+')}\n\n"
-        f"{diff_section('=== REMOVED: OLD CONTENT ===', removed, '-')}"
+        "Determine added and removed vacancies by comparing the new and old HTML "
+        "evidence. Both sections are equally important.\n\n"
+        f"EMPLOYER METADATA (copy exactly into ACF fields for create actions):\n"
+        f"{meta_json}\n\n"
+        f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\n\n"
+        f"{diff_section('=== REMOVED: PRESENT IN OLD HTML ===', removed, '-')}"
     )
-    removed_jobs = extract_removed_jobs(removed, new_html, source_url)
-    return content, {
-        "mode": "DIFF", "added": len(added), "removed": len(removed),
-        "old_lines": old_count, "new_lines": new_count,
-        "removed_jobs": removed_jobs,
-        "has_meaningful_additions": any(line.strip() for _, line in added),
-    }
+    return content, stats
 
 
 def parse_json(raw):
@@ -172,11 +173,11 @@ def parse_json(raw):
 
 
 def build_acf_json(data, site):
-    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
-        raise ValueError('AI response must contain a "jobs" array.')
+    if not isinstance(data, dict) or not isinstance(data.get("changes"), list):
+        raise ValueError('AI response must contain a "changes" array.')
 
     source_url = value_or_unavailable(site.get("url"))
-    manual = {
+    manual_metadata = {
         "employer_name": value_or_unavailable(site.get("name")),
         "job_location": value_or_unavailable(site.get("address")),
         "source_url": source_url,
@@ -185,39 +186,36 @@ def build_acf_json(data, site):
         "employer_slug": value_or_unavailable(site.get("slug")),
     }
 
-    jobs = []
-    for number, item in enumerate(data["jobs"], 1):
+    changes = []
+    for number, item in enumerate(data["changes"], 1):
         if not isinstance(item, dict):
-            raise ValueError(f"Job #{number} is not an object.")
-        url = value_or_unavailable(item.get("job_url"))
-        if url != UNAVAILABLE:
-            url = urljoin(source_url, url)
+            raise ValueError(f"Change #{number} is not an object.")
 
-        # Metadata fields are overwritten locally from sites.json,
-        # so the AI cannot accidentally change these trusted values.
-        jobs.append({
+        action = str(item.get("action", "")).strip().lower()
+        if action not in ("create", "delete"):
+            raise ValueError(f'Change #{number} has invalid action: {action!r}')
+
+        job_url = value_or_unavailable(item.get("job_url"))
+        if job_url != UNAVAILABLE and source_url != UNAVAILABLE:
+            job_url = urljoin(source_url, job_url)
+
+        job = {
+            "action": action,
             "job_title": value_or_unavailable(item.get("job_title")),
-            **manual,
-            "employment_type": value_or_unavailable(item.get("employment_type")),
-            "job_description": value_or_unavailable(item.get("job_description")),
-            "job_url": url,
-            "scraped_at": date.today().isoformat(),
-        })
-    removed_jobs = data.get("removed_jobs", [])
-    if not isinstance(removed_jobs, list):
-        raise ValueError('"removed_jobs" must be a list.')
-    normalized_removed = []
-    for item in removed_jobs:
-        if not isinstance(item, dict):
-            raise ValueError("Each removed job must be an object.")
-        url = value_or_unavailable(item.get("job_url"))
-        if url != UNAVAILABLE:
-            url = urljoin(source_url, url)
-        normalized_removed.append({
-            "job_title": value_or_unavailable(item.get("job_title")),
-            "job_url": url,
-        })
-    return {"jobs": jobs, "removed_jobs": normalized_removed}
+            "job_url": job_url,
+        }
+
+        if action == "create":
+            job.update({
+                **manual_metadata,
+                "employment_type": value_or_unavailable(item.get("employment_type")),
+                "job_description": value_or_unavailable(item.get("job_description")),
+                "scraped_at": date.today().isoformat(),
+            })
+
+        changes.append(job)
+
+    return {"changes": changes}
 
 
 def print_token_usage(usage):
@@ -248,11 +246,9 @@ def call_ai(user_content):
     return client.chat.completions.create(
         model=META_MODEL,
         messages=[
-            # Keep the unchanged system prompt first for Meta's automatic prefix cache.
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        # Stable across requests using this extraction prompt.
         extra_body={"prompt_cache_key": "data-scraping-job-extraction-v1"},
         temperature=0,
         max_tokens=4000,
@@ -265,27 +261,17 @@ def main():
         user_content, stats = prepare_input(site)
 
         log("=" * 78, Colors.BLUE)
-        log("META AI REQUEST — EXACT PROMPT AND PAYLOAD", Colors.BOLD + Colors.BLUE)
+        log("META AI REQUEST — DIFF AND ACF JSON PREVIEW", Colors.BOLD + Colors.BLUE)
         log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
+
         if stats["mode"] == "DIFF":
             log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
-
-            # Skip identical snapshots: there is no new content for the model to inspect.
-            if stats["added"] == 0 and stats["removed"] == 0:
+            if user_content is None:
                 log("\nNo HTML changes detected. Meta AI was not called.", Colors.GREEN)
-                log("No new or removed vacancies to process.", Colors.YELLOW)
+                log("No vacancy changes to process.", Colors.YELLOW)
                 log("WordPress API: NOT CALLED.", Colors.YELLOW)
                 return
 
-            # Pure removals and whitespace changes need no AI request.
-            if not stats["has_meaningful_additions"]:
-                final_data = {"jobs": [], "removed_jobs": stats["removed_jobs"]}
-                log("\nNo meaningful new content. Meta AI was not called.", Colors.GREEN)
-                log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
-                print(json.dumps(final_data, ensure_ascii=False, indent=2))
-                log(f"Removed job candidates: {len(final_data['removed_jobs'])}", Colors.YELLOW)
-                log("WordPress API: NOT CALLED.", Colors.YELLOW)
-                return
         log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
         print(SYSTEM_PROMPT.strip())
         log("\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
@@ -300,12 +286,13 @@ def main():
         print(raw)
 
         final_data = build_acf_json(parse_json(raw), site)
-        if stats["mode"] == "DIFF":
-            final_data["removed_jobs"] = stats["removed_jobs"]
-        log("\n--- FINAL JSON: JOBS AND REMOVAL CANDIDATES ---", Colors.BOLD + Colors.GREEN)
+        log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
         print(json.dumps(final_data, ensure_ascii=False, indent=2))
-        log(f"\nJobs found: {len(final_data['jobs'])}", Colors.GREEN)
-        log(f"Removed job candidates: {len(final_data['removed_jobs'])}", Colors.YELLOW)
+
+        creates = sum(1 for change in final_data["changes"] if change["action"] == "create")
+        deletes = sum(1 for change in final_data["changes"] if change["action"] == "delete")
+        log(f"\nNew vacancies (create): {creates}", Colors.GREEN)
+        log(f"Removed vacancies (delete): {deletes}", Colors.RED)
         log("WordPress API: NOT CALLED. Nothing was sent to WordPress.", Colors.YELLOW)
 
     except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, RuntimeError) as error:
