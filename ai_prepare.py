@@ -26,7 +26,7 @@ SITE_SLUG = "stoos-hotels"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
-BUILD_VERSION = "meta-diff-v2"
+BUILD_VERSION = "meta-diff-v3"
 
 
 class Colors:
@@ -44,46 +44,17 @@ def log(message="", color=Colors.RESET):
 
 
 SYSTEM_PROMPT = """
-You identify job vacancy changes by comparing the ADDED content from the new HTML
-with the REMOVED content from the old HTML.
-
-Return ONLY valid JSON with this exact top-level schema:
-{
-  "changes": [
-    {
-      "action": "create",
-      "job_title": "...",
-      "employment_type": "...",
-      "job_description": "...",
-      "job_url": "..."
-    },
-    {
-      "action": "delete",
-      "job_title": "...",
-      "job_url": "..."
-    }
-  ]
-}
+Compare added and removed HTML evidence. Return only compact valid JSON:
+{"changes":[{"action":"create","job_title":"...","job_url":"...","employment_type":"...","job_description":"..."},{"action":"delete","job_title":"...","job_url":"..."}]}
 
 Rules:
-- A vacancy present in ADDED (new HTML) but absent from REMOVED (old HTML)
-  is a new vacancy: return action "create".
-- A vacancy present in REMOVED (old HTML) but absent from ADDED (new HTML)
-  is a removed vacancy: return action "delete".
-- A vacancy represented in both sides is unchanged; do not return it.
-- Compare vacancy identity using job URL first, then a sufficiently clear job title.
-- Interpret the complete diff, including BOTH ADDED and REMOVED sections.
-- Do not assume that every removed HTML line is a removed vacancy. Ignore
-  formatting, navigation, tracking, unrelated text, and other non-vacancy changes.
-- If a job link or title is split across multiple diff lines, interpret the lines
-  together using the surrounding diff context.
-- For "create", return job_title, employment_type, job_description and job_url.
-  Use "Unavailable" for unknown values. Resolve relative job URLs against source_url.
-- For "delete", return job_title and job_url. Use "Unavailable" only if a value
-  genuinely cannot be determined from the diff.
-- Do not return full ACF employer metadata; it is supplied locally by the script.
-- Do not invent vacancies or facts.
-- If no vacancy was added or removed, return {"changes": []}.
+- ADDED only = new vacancy (create); REMOVED only = deleted vacancy (delete).
+- If the same vacancy appears on both sides, ignore it. Match by URL first, then clear title.
+- Analyze every changed line, but ignore non-vacancy changes such as formatting, navigation and tracking.
+- Combine split links/titles using surrounding diff lines. Never invent facts.
+- For create, include employment_type and job_description only when supported by the diff; otherwise omit them. Resolve relative URLs against SOURCE_URL.
+- For delete, return title and URL when available.
+- Return {"changes":[]} when no vacancy change is found.
 """
 
 
@@ -120,7 +91,6 @@ def prepare_input(site):
         "employer_slug": value_or_unavailable(site.get("slug")),
         "scraped_at": date.today().isoformat(),
     }
-    meta_json = json.dumps(metadata, ensure_ascii=False, indent=2)
 
     if not OLD_FILE.exists():
         new_html = NEW_FILE.read_text(encoding="utf-8")
@@ -128,7 +98,7 @@ def prepare_input(site):
             "INPUT MODE: FIRST_SCAN\n"
             "There is no previous HTML snapshot. Identify every current job vacancy "
             "in the new HTML and return each as action=create.\n\n"
-            f"EMPLOYER METADATA (reference only):\n{meta_json}\n\n"
+            f"SOURCE_URL: {metadata['source_url']}\n\n"
             f"=== CURRENT NEW HTML ({NEW_FILE.name}) ===\n{new_html}"
         )
         return content, {"mode": "FIRST_SCAN", "added": None, "removed": None}
@@ -153,8 +123,7 @@ def prepare_input(site):
         "INPUT MODE: DIFF\n"
         "Determine added and removed vacancies by comparing the new and old HTML "
         "evidence. Both sections are equally important.\n\n"
-        f"EMPLOYER METADATA (copy exactly into ACF fields for create actions):\n"
-        f"{meta_json}\n\n"
+        f"SOURCE_URL: {metadata['source_url']}\n\n"
         f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\n\n"
         f"{diff_section('=== REMOVED: PRESENT IN OLD HTML ===', removed, '-')}"
     )
@@ -253,9 +222,9 @@ def call_ai(user_content):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        extra_body={"prompt_cache_key": "data-scraping-job-extraction-v1"},
+        extra_body={"prompt_cache_key": "data-scraping-job-extraction-v2"},
         temperature=0,
-        max_tokens=4000,
+        max_tokens=2000,
     )
 
 
