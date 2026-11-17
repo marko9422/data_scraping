@@ -26,7 +26,7 @@ SITE_SLUG = "stoos-hotels"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
-BUILD_VERSION = "meta-diff-v3"
+BUILD_VERSION = "meta-diff-v4"
 
 
 class Colors:
@@ -203,11 +203,29 @@ def print_token_usage(usage):
         output_tokens = getattr(usage, "output_tokens", None)
     details = getattr(usage, "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", None) if details else None
-    log("\nTOKEN USAGE", Colors.BOLD + Colors.CYAN)
+    output_details = getattr(usage, "completion_tokens_details", None)
+    reasoning = getattr(output_details, "reasoning_tokens", None) if output_details else None
+    accepted_prediction = (
+        getattr(output_details, "accepted_prediction_tokens", None)
+        if output_details else None
+    )
+    rejected_prediction = (
+        getattr(output_details, "rejected_prediction_tokens", None)
+        if output_details else None
+    )
+    log("\\nTOKEN USAGE", Colors.BOLD + Colors.CYAN)
     log(f"Input tokens:  {input_tokens if input_tokens is not None else UNAVAILABLE}")
     log(f"Output tokens: {output_tokens if output_tokens is not None else UNAVAILABLE}")
     if cached is not None:
         log(f"Cached input:  {cached}")
+    if reasoning is not None:
+        log(f"Reasoning tokens: {reasoning}")
+    if accepted_prediction is not None:
+        log(f"Accepted prediction tokens: {accepted_prediction}")
+    if rejected_prediction is not None:
+        log(f"Rejected prediction tokens: {rejected_prediction}")
+    if output_details is None:
+        log("Output token details: not provided by API", Colors.YELLOW)
     if input_tokens is not None and output_tokens is not None:
         log(f"Total tokens:  {input_tokens + output_tokens}")
 
