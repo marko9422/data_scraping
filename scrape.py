@@ -15,6 +15,7 @@ Tento súbor sa bežne nespúšťa priamo. Spúšťa ho main.py.
 import asyncio
 import json
 import re
+import sys
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Comment
@@ -148,10 +149,20 @@ async def scrape_site(crawler, site, run_config, index, total):
         return False
 
 
-async def run_scraper():
-    """Spustí scraping všetkých webových stránok uvedených v sites.json."""
+async def run_scraper(site_slug=None):
+    """Scrapuje jednu stránku podľa slug alebo všetky stránky zo sites.json."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     sites = load_sites()
+
+    if site_slug:
+        sites = [site for site in sites if site.get("slug") == site_slug]
+        if not sites:
+            available = ", ".join(
+                str(site.get("slug")) for site in load_sites() if site.get("slug")
+            )
+            raise ValueError(
+                f"Slug '{site_slug}' sa nenašiel v sites.json. Dostupné slugy: {available}"
+            )
 
     log("\n" + "=" * 58, Colors.BLUE)
     log("  SCRAPING — SŤAHOVANIE A ČISTENIE HTML", Colors.BOLD + Colors.BLUE)
@@ -181,3 +192,27 @@ async def run_scraper():
     log("-" * 58 + "\n", Colors.BLUE)
 
     return successful, failed
+
+
+def main():
+    """CLI: python scrape.py [slug]. Bez slug spracuje všetky weby."""
+    if len(sys.argv) > 2:
+        log("Použitie: python scrape.py [slug]", Colors.YELLOW)
+        raise SystemExit(2)
+
+    site_slug = sys.argv[1] if len(sys.argv) == 2 else None
+
+    try:
+        successful, failed = asyncio.run(run_scraper(site_slug))
+        if failed:
+            raise SystemExit(1)
+    except KeyboardInterrupt:
+        log("\\nScraping bol prerušený používateľom.", Colors.YELLOW)
+        raise SystemExit(130)
+    except Exception as error:
+        log(f"\\nFATAL ERROR: {error}", Colors.RED)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
