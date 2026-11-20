@@ -20,9 +20,6 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "scrape_output"
 SITES_FILE = ROOT / "sites.json"
-NEW_FILE = OUTPUT / "stoos-hotels.html"
-OLD_FILE = OUTPUT / "stoos-hotels-old.html"
-SITE_SLUG = "stoos-hotels"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
@@ -54,18 +51,18 @@ Rules:
 - Combine split links/titles using surrounding diff lines. Never invent facts.
 - For create, include employment_type and job_description only when supported by the diff; otherwise omit them. Resolve relative URLs against SOURCE_URL.
 - For delete, return title and URL when available.
-- Return {"changes":[]} when no vacancy change is found.
+- If the supplied HTML is empty or contains no evidence of vacancies, return {"changes":[]}; never guess or invent vacancies.\n- Return {"changes":[]} when no vacancy change is found.
 """
 
 
-def load_site():
+def load_site(site_slug):
     if not SITES_FILE.exists():
         raise FileNotFoundError(f"Missing config: {SITES_FILE}")
     sites = json.loads(SITES_FILE.read_text(encoding="utf-8"))
     for site in sites:
-        if site.get("slug") == SITE_SLUG:
+        if site.get("slug") == site_slug:
             return site
-    raise ValueError(f"Employer slug not found in sites.json: {SITE_SLUG}")
+    raise ValueError(f"Employer slug not found in sites.json: {site_slug}")
 
 
 def value_or_unavailable(value):
@@ -78,9 +75,9 @@ def diff_section(title, rows, marker):
     return "\n".join([title] + [f"{marker} [line {number}] {line}" for number, line in rows])
 
 
-def prepare_input(site):
-    if not NEW_FILE.exists():
-        raise FileNotFoundError(f"New HTML file not found: {NEW_FILE}")
+def prepare_input(site, new_file, old_file, first_scan=False, diff=None):
+    if not new_file.exists():
+        raise FileNotFoundError(f"New HTML file not found: {new_file}")
 
     metadata = {
         "employer_name": value_or_unavailable(site.get("name")),
@@ -92,18 +89,35 @@ def prepare_input(site):
         "scraped_at": date.today().isoformat(),
     }
 
-    if not OLD_FILE.exists():
-        new_html = NEW_FILE.read_text(encoding="utf-8")
+    new_html = new_file.read_text(encoding="utf-8")
+
+    if first_scan:
+        if not new_html.strip():
+            html_section = (
+                f"=== CURRENT NEW HTML ({new_file.name}) ===\\n"
+                "[EMPTY HTML: no page content was returned. Do not infer or invent jobs. "
+                "Return exactly {\\"changes\\":[]}.]"
+            )
+        else:
+            html_section = f"=== CURRENT NEW HTML ({new_file.name}) ===\\n{new_html}"
+
         content = (
-            "INPUT MODE: FIRST_SCAN\n"
-            "There is no previous HTML snapshot. Identify every current job vacancy "
-            "in the new HTML and return each as action=create.\n\n"
-            f"SOURCE_URL: {metadata['source_url']}\n\n"
-            f"=== CURRENT NEW HTML ({NEW_FILE.name}) ===\n{new_html}"
+            "INPUT MODE: FIRST_SCAN\\n"
+            "There is no previous HTML snapshot. Identify current job vacancies only "
+            "when the supplied HTML contains direct evidence. If it is empty or contains "
+            "no vacancy evidence, return {\\"changes\\":[]}. Never invent vacancies. "
+            "Return each confirmed current vacancy as action=create.\\n\\n"
+            f"SOURCE_URL: {metadata['source_url']}\\n\\n"
+            f"{html_section}"
         )
         return content, {"mode": "FIRST_SCAN", "added": None, "removed": None}
 
-    diff = get_diff(NEW_FILE, OLD_FILE)
+    if not old_file.exists():
+        raise FileNotFoundError(f"Previous HTML snapshot not found: {old_file}")
+
+    if diff is None:
+        diff = get_diff(new_file, old_file)
+
     added, removed = diff["added"], diff["removed"]
     stats = {
         "mode": "DIFF",
@@ -114,17 +128,17 @@ def prepare_input(site):
     }
 
     # The ONLY condition that skips Meta AI is an identical HTML snapshot.
-    # Never filter or classify changed lines in Python: every non-empty diff
-    # (added and/or removed) must be sent to Meta AI for semantic analysis.
     if len(added) == 0 and len(removed) == 0:
         return None, stats
 
     content = (
-        "INPUT MODE: DIFF\n"
+        "INPUT MODE: DIFF\\n"
         "Determine added and removed vacancies by comparing the new and old HTML "
-        "evidence. Both sections are equally important.\n\n"
-        f"SOURCE_URL: {metadata['source_url']}\n\n"
-        f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\n\n"
+        "evidence. Both sections are equally important. If the new HTML is empty, "
+        "do not invent current vacancies; use only the removed evidence to identify "
+        "vacancies that have disappeared.\\n\\n"
+        f"SOURCE_URL: {metadata['source_url']}\\n\\n"
+        f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\\n\\n"
         f"{diff_section('=== REMOVED: PRESENT IN OLD HTML ===', removed, '-')}"
     )
     return content, stats
@@ -247,47 +261,65 @@ def call_ai(user_content):
     )
 
 
+def run_ai_pipeline(site_slug, new_file, old_file, first_scan=False, diff=None):
+    site = load_site(site_slug)
+    user_content, stats = prepare_input(
+        site, new_file, old_file, first_scan=first_scan, diff=diff
+    )
+
+    log("=" * 78, Colors.BLUE)
+    log("META AI REQUEST — DIFF AND ACF JSON PREVIEW", Colors.BOLD + Colors.BLUE)
+    log(f"BUILD VERSION: {BUILD_VERSION}", Colors.BOLD + Colors.GREEN)
+    log(f"Employer: {site.get('name')} | Slug: {site_slug}", Colors.CYAN)
+    log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
+
+    if stats["mode"] == "DIFF":
+        log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
+        if user_content is None:
+            log("\\nHTML snapshots are identical (empty diff). Meta AI was not called.", Colors.GREEN)
+            log("No changed content to analyze.", Colors.YELLOW)
+            log("WordPress API: NOT CALLED.", Colors.YELLOW)
+            return
+
+    log("\\n--- SYSTEM PROMPT ---", Colors.CYAN)
+    print(SYSTEM_PROMPT.strip())
+    log("\\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
+    print(user_content)
+
+    log("\\nCalling Meta AI...", Colors.YELLOW)
+    response = call_ai(user_content)
+    print_token_usage(getattr(response, "usage", None))
+
+    raw = response.choices[0].message.content or ""
+    log("\\n--- RAW AI OUTPUT ---", Colors.CYAN)
+    print(raw)
+
+    final_data = build_acf_json(parse_json(raw), site)
+    log("\\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
+    print(json.dumps(final_data, ensure_ascii=False, indent=2))
+
+    creates = sum(1 for change in final_data["changes"] if change["action"] == "create")
+    deletes = sum(1 for change in final_data["changes"] if change["action"] == "delete")
+    log(f"\\nNew vacancies (create): {creates}", Colors.GREEN)
+    log(f"Removed vacancies (delete): {deletes}", Colors.RED)
+    log("WordPress API: NOT CALLED. Nothing was sent to WordPress.", Colors.YELLOW)
+
+
 def main():
+    import sys
+
+    if len(sys.argv) != 2:
+        log("Použitie: python ai_prepare.py <slug>", Colors.YELLOW)
+        raise SystemExit(2)
+
+    site_slug = sys.argv[1]
+    site = load_site(site_slug)
+    new_file = OUTPUT / f"{site_slug}.html"
+    old_file = OUTPUT / f"{site_slug}-old.html"
+    first_scan = not old_file.exists()
+
     try:
-        site = load_site()
-        user_content, stats = prepare_input(site)
-
-        log("=" * 78, Colors.BLUE)
-        log("META AI REQUEST — DIFF AND ACF JSON PREVIEW", Colors.BOLD + Colors.BLUE)
-        log(f"BUILD VERSION: {BUILD_VERSION}", Colors.BOLD + Colors.GREEN)
-        log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
-
-        if stats["mode"] == "DIFF":
-            log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
-            if user_content is None:
-                log("\nHTML snapshots are identical (empty diff). Meta AI was not called.", Colors.GREEN)
-                log("No changed content to analyze.", Colors.YELLOW)
-                log("WordPress API: NOT CALLED.", Colors.YELLOW)
-                return
-
-        log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
-        print(SYSTEM_PROMPT.strip())
-        log("\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
-        print(user_content)
-
-        log("\nCalling Meta AI...", Colors.YELLOW)
-        response = call_ai(user_content)
-        print_token_usage(getattr(response, "usage", None))
-
-        raw = response.choices[0].message.content or ""
-        log("\n--- RAW AI OUTPUT ---", Colors.CYAN)
-        print(raw)
-
-        final_data = build_acf_json(parse_json(raw), site)
-        log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
-        print(json.dumps(final_data, ensure_ascii=False, indent=2))
-
-        creates = sum(1 for change in final_data["changes"] if change["action"] == "create")
-        deletes = sum(1 for change in final_data["changes"] if change["action"] == "delete")
-        log(f"\nNew vacancies (create): {creates}", Colors.GREEN)
-        log(f"Removed vacancies (delete): {deletes}", Colors.RED)
-        log("WordPress API: NOT CALLED. Nothing was sent to WordPress.", Colors.YELLOW)
-
+        run_ai_pipeline(site_slug, new_file, old_file, first_scan=first_scan)
     except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError, RuntimeError) as error:
         log(f"ERROR: {error}", Colors.RED)
         raise SystemExit(1)
