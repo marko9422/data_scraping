@@ -78,6 +78,26 @@ def clean_html(html):
     """Odstráni technický balast, ale zachová čitateľný obsah a odkazy."""
     soup = BeautifulSoup(html, "html.parser")
 
+    # Odstráni cookie dialógy a známe cookie-consent kontajnery.
+    for tag in soup.find_all("dialog"):
+        tag.decompose()
+
+    cookie_selectors = [
+        "#usercentrics-root",
+        "#CybotCookiebotDialog",
+        "#onetrust-consent-sdk",
+        ".cookie-banner",
+        ".cookie-consent",
+        ".cookie-dialog",
+    ]
+    for selector in cookie_selectors:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    # Odstráni pätičku stránky; pracovné ponuky sa očakávajú v hlavnom obsahu.
+    for tag in soup.find_all("footer"):
+        tag.decompose()
+
     for tag in soup.find_all([
         "script", "style", "noscript", "svg", "canvas",
         "img", "picture", "video", "audio", "source", "track",
