@@ -94,20 +94,20 @@ def prepare_input(site, new_file, old_file, first_scan=False, diff=None):
     if first_scan:
         if not new_html.strip():
             html_section = (
-                f"=== CURRENT NEW HTML ({new_file.name}) ===\\n"
+                f"=== CURRENT NEW HTML ({new_file.name}) ===\n"
                 "[EMPTY HTML: no page content was returned. Do not infer or invent jobs. "
-                "Return exactly {\\"changes\\":[]}.]"
+                "Return exactly {\"changes\":[]}.]"
             )
         else:
-            html_section = f"=== CURRENT NEW HTML ({new_file.name}) ===\\n{new_html}"
+            html_section = f"=== CURRENT NEW HTML ({new_file.name}) ===\n{new_html}"
 
         content = (
-            "INPUT MODE: FIRST_SCAN\\n"
+            "INPUT MODE: FIRST_SCAN\n"
             "There is no previous HTML snapshot. Identify current job vacancies only "
             "when the supplied HTML contains direct evidence. If it is empty or contains "
-            "no vacancy evidence, return {\\"changes\\":[]}. Never invent vacancies. "
-            "Return each confirmed current vacancy as action=create.\\n\\n"
-            f"SOURCE_URL: {metadata['source_url']}\\n\\n"
+            "no vacancy evidence, return {\"changes\":[]}. Never invent vacancies. "
+            "Return each confirmed current vacancy as action=create.\n\n"
+            f"SOURCE_URL: {metadata['source_url']}\n\n"
             f"{html_section}"
         )
         return content, {"mode": "FIRST_SCAN", "added": None, "removed": None}
@@ -132,13 +132,13 @@ def prepare_input(site, new_file, old_file, first_scan=False, diff=None):
         return None, stats
 
     content = (
-        "INPUT MODE: DIFF\\n"
+        "INPUT MODE: DIFF\n"
         "Determine added and removed vacancies by comparing the new and old HTML "
         "evidence. Both sections are equally important. If the new HTML is empty, "
         "do not invent current vacancies; use only the removed evidence to identify "
-        "vacancies that have disappeared.\\n\\n"
-        f"SOURCE_URL: {metadata['source_url']}\\n\\n"
-        f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\\n\\n"
+        "vacancies that have disappeared.\n\n"
+        f"SOURCE_URL: {metadata['source_url']}\n\n"
+        f"{diff_section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\n\n"
         f"{diff_section('=== REMOVED: PRESENT IN OLD HTML ===', removed, '-')}"
     )
     return content, stats
@@ -227,7 +227,7 @@ def print_token_usage(usage):
         getattr(output_details, "rejected_prediction_tokens", None)
         if output_details else None
     )
-    log("\\nTOKEN USAGE", Colors.BOLD + Colors.CYAN)
+    log("\nTOKEN USAGE", Colors.BOLD + Colors.CYAN)
     log(f"Input tokens:  {input_tokens if input_tokens is not None else UNAVAILABLE}")
     log(f"Output tokens: {output_tokens if output_tokens is not None else UNAVAILABLE}")
     if cached is not None:
@@ -276,31 +276,31 @@ def run_ai_pipeline(site_slug, new_file, old_file, first_scan=False, diff=None):
     if stats["mode"] == "DIFF":
         log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
         if user_content is None:
-            log("\\nHTML snapshots are identical (empty diff). Meta AI was not called.", Colors.GREEN)
+            log("\nHTML snapshots are identical (empty diff). Meta AI was not called.", Colors.GREEN)
             log("No changed content to analyze.", Colors.YELLOW)
             log("WordPress API: NOT CALLED.", Colors.YELLOW)
             return
 
-    log("\\n--- SYSTEM PROMPT ---", Colors.CYAN)
+    log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
     print(SYSTEM_PROMPT.strip())
-    log("\\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
+    log("\n--- USER CONTENT (exact request payload) ---", Colors.CYAN)
     print(user_content)
 
-    log("\\nCalling Meta AI...", Colors.YELLOW)
+    log("\nCalling Meta AI...", Colors.YELLOW)
     response = call_ai(user_content)
     print_token_usage(getattr(response, "usage", None))
 
     raw = response.choices[0].message.content or ""
-    log("\\n--- RAW AI OUTPUT ---", Colors.CYAN)
+    log("\n--- RAW AI OUTPUT ---", Colors.CYAN)
     print(raw)
 
     final_data = build_acf_json(parse_json(raw), site)
-    log("\\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
+    log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
     print(json.dumps(final_data, ensure_ascii=False, indent=2))
 
     creates = sum(1 for change in final_data["changes"] if change["action"] == "create")
     deletes = sum(1 for change in final_data["changes"] if change["action"] == "delete")
-    log(f"\\nNew vacancies (create): {creates}", Colors.GREEN)
+    log(f"\nNew vacancies (create): {creates}", Colors.GREEN)
     log(f"Removed vacancies (delete): {deletes}", Colors.RED)
     log("WordPress API: NOT CALLED. Nothing was sent to WordPress.", Colors.YELLOW)
 
