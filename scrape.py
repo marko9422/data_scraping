@@ -15,6 +15,7 @@ Tento súbor sa bežne nespúšťa priamo. Spúšťa ho main.py.
 import asyncio
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -66,6 +67,11 @@ def make_filename(site):
     slug = site.get("slug") or site["name"].lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
     return f"{slug or 'website'}.html"
+
+
+def make_old_filename(site):
+    """Vytvorí názov záložného HTML snapshotu."""
+    return f"{Path(make_filename(site)).stem}-old.html"
 
 
 def clean_html(html):
@@ -129,13 +135,21 @@ async def scrape_site(crawler, site, run_config, index, total):
             log(f"NEÚSPECH: {result.error_message}", Colors.RED)
             return False
 
-        html = result.html or result.cleaned_html
-        if not html:
-            log("NEÚSPECH: Stránka vrátila prázdne HTML.", Colors.RED)
-            return False
+        html = result.html if result.html is not None else result.cleaned_html
+        if html is None:
+            html = ""
+
+        if not html.strip():
+            log("UPOZORNENIE: Stránka vrátila prázdne HTML. Uložím prázdny snapshot; AI dostane pokyn nevyvodzovať žiadne pracovné ponuky.", Colors.YELLOW)
 
         log("Čistím HTML pomocou BeautifulSoup...", Colors.BLUE)
         cleaned = clean_html(html)
+
+        # Pred prepísaním aktuálneho HTML zachovaj predchádzajúci snapshot.
+        if output_file.exists():
+            old_file = OUTPUT_DIR / make_old_filename(site)
+            shutil.copy2(output_file, old_file)
+            log(f"Predchádzajúci HTML snapshot uložený: {old_file.name}", Colors.YELLOW)
 
         output_file.write_text(cleaned, encoding="utf-8")
 
