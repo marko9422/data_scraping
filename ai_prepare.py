@@ -273,6 +273,16 @@ def run_ai_pipeline(site_slug, new_file, old_file, first_scan=False, diff=None):
     log(f"Employer: {site.get('name')} | Slug: {site_slug}", Colors.CYAN)
     log(f"Model: {META_MODEL} | Mode: {stats['mode']}", Colors.CYAN)
 
+    # Prázdny prvý snapshot nemá dôkaz o pracovných ponukách.
+    # V tomto prípade je bezpečnejšie AI vôbec nevolať.
+    if first_scan and not new_file.read_text(encoding="utf-8").strip():
+        final_data = {"changes": []}
+        log("\\nPrvý HTML snapshot je prázdny. Meta AI sa nevolá, aby nevymyslela pracovné ponuky.", Colors.YELLOW)
+        log("\\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
+        print(json.dumps(final_data, ensure_ascii=False, indent=2))
+        log("WordPress API: NOT CALLED.", Colors.YELLOW)
+        return
+
     if stats["mode"] == "DIFF":
         log(f"ADDED: {stats['added']} lines | REMOVED: {stats['removed']} lines")
         if user_content is None:
