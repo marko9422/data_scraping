@@ -221,10 +221,10 @@ def main():
         if failed:
             raise SystemExit(1)
     except KeyboardInterrupt:
-        log("\\nScraping bol prerušený používateľom.", Colors.YELLOW)
+        log("\nScraping bol prerušený používateľom.", Colors.YELLOW)
         raise SystemExit(130)
     except Exception as error:
-        log(f"\\nFATAL ERROR: {error}", Colors.RED)
+        log(f"\nFATAL ERROR: {error}", Colors.RED)
         raise SystemExit(1)
 
 
