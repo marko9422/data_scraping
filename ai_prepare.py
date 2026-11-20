@@ -23,7 +23,7 @@ SITES_FILE = ROOT / "sites.json"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
-BUILD_VERSION = "meta-diff-v5"
+BUILD_VERSION = "meta-diff-v6"
 
 
 class Colors:
