@@ -196,3 +196,118 @@ crawl4ai-setup
 - Ak pracovná ponuka zmizne zo stránky, nemusí to automaticky znamenať, že bola obsadená.
 - Predchádzajúce HTML súbory sa pri ďalšom scrapovaní prepíšu novšou zálohou.
 - Testuj zmeny najskôr cez `test.py`, aby si nemusel opakovane sťahovať reálne stránky.
+
+
+---
+
+## 7. Ako vyzerá JSON z AI
+
+Pri bežnom workflowe (`main.py` alebo `ai_prepare.py`) AI vracia objekt `changes`.
+
+### Nová pracovná ponuka – create
+
+Toto sú polia, ktoré AI dostáva v zadaní:
+
+```json
+{
+  "changes": [
+    {
+      "action": "create",
+      "job_title": "Koch / Köchin",
+      "job_url": "https://example.ch/jobs/koch",
+      "employment_type": "100%",
+      "job_description": "Príprava jedál a práca v kuchyni"
+    }
+  ]
+}
+```
+
+AI dodáva:
+- `action` – `create`
+- `job_title` – názov pracovnej pozície
+- `job_url` – odkaz na pracovnú ponuku
+- `employment_type` – úväzok, ak ho vie z HTML zistiť
+- `job_description` – popis práce, ak ho vie z HTML zistiť
+
+Posledné dve polia AI nemusí vrátiť, ak ich nevie spoľahlivo zistiť.
+
+### Zmiznutá pracovná ponuka – delete
+
+```json
+{
+  "changes": [
+    {
+      "action": "delete",
+      "job_title": "Koch / Köchin",
+      "job_url": "https://example.ch/jobs/koch"
+    }
+  ]
+}
+```
+
+AI dodáva:
+- `action` – `delete`
+- `job_title` – názov pozície, ak ho vie zistiť
+- `job_url` – odkaz, ak ho vie zistiť
+
+Pri `delete` Python nepridáva údaje zamestnávateľa.
+
+### Čo doplní Python zo sites.json?
+
+Pri bežnom workflowe Python vezme údaje zamestnávateľa z príslušného záznamu v `sites.json` a doplní ich k zmene typu `create`.
+
+| Výsledné JSON pole | Odkiaľ pochádza |
+|---|---|
+| `action` | AI |
+| `job_title` | AI |
+| `job_url` | AI; Python prevedie relatívny odkaz na úplnú URL pomocou adresy webu |
+| `employer_name` | `name` zo sites.json |
+| `job_location` | `address` zo sites.json |
+| `source_url` | `url` zo sites.json |
+| `canton` | `canton` zo sites.json |
+| `scope` | `scope` zo sites.json |
+| `employer_slug` | `slug` zo sites.json |
+| `employment_type` | AI |
+| `job_description` | AI |
+| `scraped_at` | Python – aktuálny dátum |
+
+Príklad výsledného JSON pre `create` po doplnení údajov Python-om:
+
+```json
+{
+  "changes": [
+    {
+      "action": "create",
+      "job_title": "Koch / Köchin",
+      "job_url": "https://example.ch/jobs/koch",
+      "employer_name": "Stoos Hotels",
+      "job_location": "Ringstrasse 10, 6433 Stoos, Switzerland",
+      "source_url": "https://stoos-hotels.ch/karriere/",
+      "canton": "Schwyz",
+      "scope": "local",
+      "employer_slug": "stoos-hotels",
+      "employment_type": "100%",
+      "job_description": "Príprava jedál a práca v kuchyni",
+      "scraped_at": "2026-11-22"
+    }
+  ]
+}
+```
+
+Pri `delete` Python výsledok ponechá len v tomto tvare:
+
+```json
+{
+  "changes": [
+    {
+      "action": "delete",
+      "job_title": "Koch / Köchin",
+      "job_url": "https://example.ch/jobs/koch"
+    }
+  ]
+}
+```
+
+Ak niektorú hodnotu Python nevie získať, doplní text `Unavailable`. Dátum `scraped_at` vytvára Python, nie AI.
+
+**Poznámka k test.py:** testovací skript má vlastný AI prompt. Vypíše priamo JSON od AI a nedopĺňa doň údaje zo `sites.json`. Preto jeho výstup nemusí obsahovať polia zamestnávateľa ani `scraped_at`.
