@@ -1,177 +1,18 @@
-# Data Scraping – Swiss Hospitality Jobs
+# Data Scraping – pracovné ponuky
 
-Python projekt na sledovanie pracovných ponúk na kariérnych stránkach hotelov a gastro prevádzok vo Švajčiarsku.
+Malý Python projekt, ktorý sleduje pracovné ponuky na stránkach hotelov a gastro prevádzok vo Švajčiarsku.
 
-Projekt:
-1. Stiahne HTML stránku zamestnávateľa.
-2. Vyčistí HTML od technického balastu.
-3. Uloží aktuálny HTML snapshot a zachová predchádzajúci snapshot.
-4. Porovná starý a nový HTML obsah.
-5. Pošle zmeny do Meta AI na identifikáciu nových alebo zmiznutých pracovných ponúk.
-6. Vypíše výsledný JSON do terminálu.
+**Čo robí:** stiahne stránku → vyčistí HTML → porovná starú a novú verziu → pošle zmeny do Meta AI → vypíše výsledok v JSON.
 
-**WordPress integrácia nie je implementovaná.** Projekt momentálne iba pripravuje a vypisuje JSON; nič neposiela do WordPress API.
+**WordPress zatiaľ nie je prepojený.** Projekt nič neposiela do WordPressu.
 
 ---
 
-## 1. Požiadavky
+## 1. Najčastejšie príkazy
 
-- Python 3
-- Meta AI API key
-- Internetové pripojenie
-- Závislosti:
-  - `crawl4ai`
-  - `beautifulsoup4`
-  - `openai`
-  - `python-dotenv`
+Príkazy spúšťaj v termináli v priečinku projektu.
 
-V projekte zatiaľ nie je `requirements.txt`, preto sa závislosti inštalujú ručne.
-
-## 2. Inštalácia
-
-V termináli prejdi do priečinka projektu.
-
-### Vytvorenie virtuálneho prostredia
-
-Windows / Git Bash:
-
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
-```
-
-Ak používaš Windows CMD:
-
-```cmd
-.venv\\Scripts\\activate
-```
-
-### Inštalácia knižníc
-
-```bash
-python -m pip install --upgrade pip
-pip install crawl4ai beautifulsoup4 openai python-dotenv
-```
-
-Crawl4AI môže po inštalácii vyžadovať inicializáciu prehliadača:
-
-```bash
-crawl4ai-setup
-```
-
-## 3. Konfigurácia Meta AI
-
-V koreňovom priečinku projektu vytvor súbor `.env`:
-
-```env
-META_API_KEY=your_meta_api_key
-META_MODEL=muse-spark-1.3-contributor
-```
-
-- `META_API_KEY` – povinný API kľúč.
-- `META_MODEL` – voliteľný názov modelu; ak nie je nastavený, použije sa predvolený model uvedený v `ai_prepare.py`.
-
-Súbor `.env` je v `.gitignore` a nesmie sa commitovať do GitHubu.
-
----
-
-## 4. Súbory projektu
-
-| Súbor | Úloha |
-|---|---|
-| `main.py` | Hlavný produkčný workflow pre jedného zamestnávateľa. |
-| `scrape.py` | Sťahuje webové stránky a čistí HTML pomocou Crawl4AI a BeautifulSoup. |
-| `compare.py` | Porovnáva starý a nový HTML súbor a vytvára zoznam pridaných a odstránených riadkov. |
-| `ai_prepare.py` | Pripravuje vstup pre Meta AI, volá API, spracuje JSON odpoveď a doplní údaje zamestnávateľa. |
-| `test.py` | Samostatný testovací workflow nad dvoma ručne pripravenými HTML súbormi. |
-| `sites.json` | Zoznam zamestnávateľov, ich URL, slug, adresa, kantón a rozsah pôsobenia. |
-| `.env` | Lokálna konfigurácia API kľúča a voliteľného modelu. |
-| `.gitignore` | Vylučuje virtuálne prostredie, API tajomstvá, Python cache a výstupné HTML súbory. |
-
-### `main.py` – hlavný workflow
-
-Spúšťa celý proces pre jedného zamestnávateľa podľa jeho slug.
-
-Poradie:
-1. Nájde zamestnávateľa v `sites.json`.
-2. Určí názvy aktuálneho a starého HTML súboru.
-3. Zistí, či ide o prvé skenovanie.
-4. Spustí scraper.
-5. Pri prvom skenovaní pošle aktuálne HTML do AI ako `FIRST_SCAN`.
-6. Pri ďalších skenovaniach porovná starý a nový snapshot.
-7. Pošle diff do Meta AI a vypíše výsledný JSON.
-
-Ak scraping zlyhá alebo chýba očakávaný snapshot, workflow sa zastaví.
-
-### `scrape.py` – scraping a čistenie
-
-- Načíta zamestnávateľov z `sites.json`.
-- Používa Crawl4AI s headless prehliadačom.
-- Čaká na načítanie stránky pomocou `networkidle` (timeout 60 sekúnd).
-- Pomocou BeautifulSoup odstraňuje skripty, štýly, obrázky, cookie bannery, pätičky a ďalší nepotrebný obsah.
-- Zachováva text a odkazy.
-- Pred prepísaním aktuálneho HTML skopíruje existujúci snapshot do súboru s príponou `-old.html`.
-
-Scraper môže bežať pre jeden slug alebo pre všetkých zamestnávateľov.
-
-### `compare.py` – porovnávanie HTML
-
-Používa Python `difflib.SequenceMatcher` na porovnanie riadkov.
-
-Výsledok obsahuje:
-- `added` – riadky pridané v novom HTML,
-- `removed` – riadky, ktoré boli v starom HTML a v novom chýbajú,
-- počet riadkov v starom a novom súbore.
-
-Porovnanie je založené na riadkoch HTML, nie na sémantickom porozumení pracovným ponukám. O tom, či ide o skutočnú pracovnú ponuku, rozhoduje následne AI.
-
-### `ai_prepare.py` – Meta AI a JSON
-
-- Načíta konfiguráciu zamestnávateľa zo `sites.json`.
-- Pri prvom skenovaní pripraví celé HTML.
-- Pri ďalších skenovaniach pripraví pridané a odstránené riadky.
-- Ak sa HTML nezmenilo, AI volanie preskočí.
-- Odošle požiadavku do Meta AI cez OpenAI-kompatibilné SDK.
-- Parsuje JSON odpoveď.
-- Doplní manuálne údaje zamestnávateľa, napríklad názov, adresu, kantón a slug.
-- Vypíše finálny JSON a spotrebu tokenov.
-
-Výstup používa akcie:
-- `create` – nová pracovná ponuka,
-- `delete` – pracovná ponuka, ktorá zmizla zo stránky.
-
-**Pozor:** zmiznutie odkazu zo stránky automaticky nedokazuje, že pracovná pozícia bola definitívne obsadená alebo zrušená. Výsledky AI je vhodné pred ďalším automatickým spracovaním kontrolovať.
-
-### `test.py` – samostatný testovací režim
-
-Testovací režim nepotrebuje slug, `sites.json` ani živú webovú stránku.
-
-Používa výhradne tieto dva súbory:
-
-```text
-scrape_output/
-├── test.html
-└── test-old.html
-```
-
-- `test.html` – nová verzia HTML.
-- `test-old.html` – staršia verzia HTML.
-
-Súbory si pripravíš ručne skopírovaním HTML, ktoré chceš porovnať.
-
-Skript:
-1. Porovná HTML cez funkciu z `compare.py`.
-2. Vypíše zmeny do terminálu.
-3. Pri štandardnom spustení odošle diff do Meta AI.
-4. Vypíše surovú odpoveď AI a výsledný JSON.
-
-Testovací režim nemení HTML súbory, nespúšťa scraping a nevolá WordPress API. Pri relatívnych URL ich ponecháva v pôvodnom tvare, pretože nemá nastavenú zdrojovú adresu stránky.
-
----
-
-## 5. Príkazy
-
-### Hlavný workflow – jeden zamestnávateľ
+### Hlavný príkaz – celý proces pre jeden hotel
 
 ```bash
 python main.py stoos-hotels
@@ -179,65 +20,113 @@ python main.py gasthof-zum-ochsen
 python main.py les-trois-rois
 ```
 
-Slug musí existovať v `sites.json`.
+Čo sa stane:
+1. Stiahne stránku zamestnávateľa.
+2. Uloží nové HTML a predchádzajúcu verziu.
+3. Porovná ich.
+4. Pošle zmeny do Meta AI.
+5. Vypíše výsledok v termináli.
 
-### Samostatný scraping
+Názov za `main.py` je slug z `sites.json`.
 
-Scrapovanie jedného zamestnávateľa:
+### Stiahnuť HTML bez AI
+
+Iba jeden zamestnávateľ:
 
 ```bash
 python scrape.py stoos-hotels
 ```
 
-Scrapovanie všetkých zamestnávateľov:
+Všetci zamestnávatelia:
 
 ```bash
 python scrape.py
 ```
 
-Tento príkaz iba stiahne a uloží HTML. Nespúšťa porovnávanie ani AI.
+Tento príkaz iba stiahne a uloží HTML. AI sa nespustí.
 
-### Samostatné porovnanie
+### Otestovať vlastné HTML súbory
 
-Predvolené súbory pre Stoos Hotels:
+Priprav si tieto dva súbory v priečinku `scrape_output`:
 
-```bash
-python compare.py
+```text
+scrape_output/
+├── test.html       # nová verzia
+└── test-old.html   # stará verzia
 ```
 
-Vlastné názvy súborov (musia byť v `scrape_output`):
-
-```bash
-python compare.py test.html test-old.html
-```
-
-### Samostatné AI spracovanie
-
-```bash
-python ai_prepare.py stoos-hotels
-```
-
-Používa HTML súbory konkrétneho zamestnávateľa a jeho metadata z `sites.json`.
-
-### Testovací workflow
-
-Porovnanie a Meta AI:
+Potom spusti:
 
 ```bash
 python test.py
 ```
 
-Iba porovnanie, bez API volania:
+Porovná súbory, vypíše zmeny a odošle ich do Meta AI.
+
+Ak chceš iba porovnanie bez AI:
 
 ```bash
 python test.py --no-ai
 ```
 
+Testovací režim nič nesťahuje a nemení tvoje HTML súbory.
+
+### Iba porovnať HTML
+
+```bash
+python compare.py
+```
+
+Porovná predvolené súbory pre Stoos Hotels.
+
+Vlastné súbory:
+
+```bash
+python compare.py test.html test-old.html
+```
+
+Názvy súborov sa hľadajú v priečinku `scrape_output`.
+
+### Spustiť iba AI spracovanie
+
+```bash
+python ai_prepare.py stoos-hotels
+```
+
+Použije už uložené HTML pre daný slug, porovná ho a pošle zmeny do Meta AI. Nespúšťa nový scraping.
+
 ---
 
-## 6. Ako fungujú HTML snapshoty
+## 2. Čo robia jednotlivé súbory
 
-Pre každého zamestnávateľa sa v `scrape_output` ukladajú dva súbory:
+| Súbor | Jednoduché vysvetlenie |
+|---|---|
+| `main.py` | Hlavný príkaz. Spustí celý proces pre jedného zamestnávateľa. |
+| `scrape.py` | Stiahne webovú stránku a uloží vyčistené HTML. |
+| `compare.py` | Porovná dve HTML verzie a vypíše, čo pribudlo a čo zmizlo. |
+| `ai_prepare.py` | Pošle zmeny do Meta AI a pripraví výsledný JSON. |
+| `test.py` | Testuje vlastné súbory `test.html` a `test-old.html`. |
+| `sites.json` | Zoznam webov, ktoré sa majú sledovať, spolu s ich údajmi. |
+| `.env` | Obsahuje API kľúč pre Meta AI. |
+| `.gitignore` | Zoznam súborov, ktoré sa nemajú ukladať na GitHub. |
+
+### Čo sa stane, keď spustím jednotlivé Python súbory?
+
+- `python main.py <slug>` – spustí celý proces.
+- `python scrape.py <slug>` – stiahne HTML a uloží ho. Ak už existuje staršia verzia, presunie ju do súboru s `-old`.
+- `python scrape.py` – stiahne HTML všetkých webov v `sites.json`.
+- `python compare.py` – iba porovná HTML a vypíše zmeny.
+- `python ai_prepare.py <slug>` – použije uložené HTML a zavolá Meta AI.
+- `python test.py` – porovná testovacie HTML a zavolá Meta AI.
+- `python test.py --no-ai` – iba porovná testovacie HTML, bez AI.
+
+**Pozor:** samostatné spustenie `scrape.py` môže prepísať aktuálne HTML a uložiť jeho predchádzajúcu verziu. Príkazy s Meta AI môžu spotrebovať API tokeny.
+
+---
+
+## 3. Ako fungujú uložené HTML súbory
+
+Pre každý web sa ukladajú dve verzie. Napríklad:
 
 ```text
 scrape_output/
@@ -245,54 +134,65 @@ scrape_output/
 └── stoos-hotels-old.html
 ```
 
-Pri ďalšom scrapovaní sa existujúci aktuálny súbor najskôr skopíruje do `-old.html` a až potom sa uloží nové HTML.
+- `stoos-hotels.html` – aktuálna verzia stránky.
+- `stoos-hotels-old.html` – predchádzajúca verzia.
 
-Následne sa porovná:
-- starý snapshot: `stoos-hotels-old.html`
-- nový snapshot: `stoos-hotels.html`
+Pri ďalšom scrapovaní sa aktuálna verzia najskôr skopíruje do `-old.html` a potom sa uloží nová.
 
-Pri prvom skenovaní ešte starý snapshot neexistuje. `main.py` preto pošle aktuálne HTML do AI ako prvé skenovanie, nie ako diff.
+Prvýkrát ešte stará verzia neexistuje. Vtedy sa celé aktuálne HTML pošle do AI, aby našla pracovné ponuky.
 
-**Dôležité:** `scrape_output/` je v `.gitignore`. HTML snapshoty sú lokálne a Git ich nesynchronizuje. Pri práci na inom počítači alebo po čistej inštalácii ich treba znovu vytvoriť.
-
----
-
-## 7. Konfigurácia zamestnávateľov – `sites.json`
-
-Každý záznam obsahuje:
-
-| Pole | Význam |
-|---|---|
-| `name` | Názov zamestnávateľa |
-| `slug` | Jedinečný identifikátor používaný v príkazoch a názvoch súborov |
-| `url` | Kariérna stránka, ktorú scraper otvorí |
-| `address` | Adresa zamestnávateľa alebo pracoviska |
-| `canton` | Kantón |
-| `scope` | Rozsah pôsobenia, napr. `local` alebo `national` |
-
-Pri pridaní zamestnávateľa doplň nový objekt do JSON poľa a použi jedinečný slug.
+Priečinok `scrape_output` je lokálny a neukladá sa na GitHub.
 
 ---
 
-## 8. Čo projekt zatiaľ nerobí
+## 4. Zoznam webov – sites.json
 
-- Neodosiela pracovné ponuky do WordPressu.
-- Neoveruje, či je pracovná ponuka na externom webe stále aktívna.
-- Nemá automatické plánovanie scrapingov.
-- Nemá databázu histórie pracovných ponúk.
-- Nemá automatické testy ani samostatný `requirements.txt`.
-- Diff porovnáva HTML po riadkoch; zmena formátovania môže vytvoriť zbytočné rozdiely.
+Každý web má tieto údaje:
+
+- `name` – názov zamestnávateľa.
+- `slug` – krátky názov používaný v príkazoch.
+- `url` – adresa kariérnej stránky.
+- `address` – adresa zamestnávateľa.
+- `canton` – kantón.
+- `scope` – napríklad `local` alebo `national`.
+
+Ak chceš pridať ďalší web, doplň ho do `sites.json`.
 
 ---
 
-## 9. Odporúčané ďalšie zlepšenia
+## 5. Nastavenie a knižnice
 
-Nie je potrebné pridávať zložité architektonické vrstvy. Najväčší prínos by mali tieto kroky, v tomto poradí:
+Použité Python knižnice:
 
-1. **Pridať `requirements.txt`** – reprodukovateľná inštalácia závislostí na inom počítači.
-2. **Zjednotiť detekciu prvého skenovania** – `main.py` a samostatné `ai_prepare.py` momentálne určujú prvé skenovanie odlišne. Je vhodné používať rovnakú logiku.
-3. **Pridať základné automatické testy** – najmä pre diff, parsovanie AI JSON a správanie pri chýbajúcich súboroch.
-4. **Zlepšiť porovnávanie HTML** – pred diffom extrahovať relevantné pracovné ponuky a porovnávať ich podľa URL alebo stabilného identifikátora. Tým sa zníži šum z nepodstatných zmien stránky.
-5. **Pridať kontrolný krok pred budúcim zápisom do WordPressu** – validácia JSON a kontrola, či sa pracovná ponuka skutočne zmenila, skôr než sa vykoná create/delete.
+- **Crawl4AI** – otvorí a stiahne webovú stránku.
+- **BeautifulSoup** – vyčistí HTML od nepotrebného obsahu.
+- **OpenAI SDK** – posiela požiadavky do Meta AI API.
+- **python-dotenv** – načíta API kľúč zo súboru `.env`.
 
-Najprv odporúčam dokončiť prvé tri body. WordPress integráciu má zmysel riešiť až po stabilnom a otestovanom JSON výstupe.
+V koreňovom priečinku musíš mať súbor `.env`:
+
+```env
+META_API_KEY=tvoj_api_kluc
+META_MODEL=muse-spark-1.3-contributor
+```
+
+Inštalácia knižníc:
+
+```bash
+pip install crawl4ai beautifulsoup4 openai python-dotenv
+```
+
+Ak Crawl4AI ešte nemá pripravený prehliadač:
+
+```bash
+crawl4ai-setup
+```
+
+---
+
+## 6. Dôležité
+
+- Projekt zatiaľ **neodosiela nič do WordPressu**. Iba vypisuje JSON.
+- Ak pracovná ponuka zmizne zo stránky, nemusí to automaticky znamenať, že bola obsadená.
+- Predchádzajúce HTML súbory sa pri ďalšom scrapovaní prepíšu novšou zálohou.
+- Testuj zmeny najskôr cez `test.py`, aby si nemusel opakovane sťahovať reálne stránky.
