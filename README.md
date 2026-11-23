@@ -257,7 +257,6 @@ AI vráti názov, URL a kategóriu. Python doplní `job_id`, údaje zamestnávat
       "action": "create",
       "job_id": "sha256-hash-generated-by-python",
       "job_title": "Koch / Köchin",
-      "job_id": "sha256-hash-generated-by-python",
       "job_url": "https://example.ch/jobs/koch",
       "employer_name": "Stoos Hotels",
       "job_location": "Ringstrasse 10, 6433 Stoos, Switzerland",
