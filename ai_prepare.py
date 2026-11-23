@@ -41,7 +41,7 @@ CATEGORIES = {
     "other": "Use only when the position does not clearly fit another category.",
 }
 
-CATEGORY_INSTRUCTIONS = "\\n".join(
+CATEGORY_INSTRUCTIONS = "\n".join(
     f"- {category}: {description}" for category, description in CATEGORIES.items()
 )
 
