@@ -4,12 +4,13 @@ Meta AI job change detection and ACF JSON preview.
 This script only prints JSON. It never calls the WordPress API.
 """
 
+import hashlib
 import json
 import os
 import re
 from datetime import date
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -23,7 +24,26 @@ SITES_FILE = ROOT / "sites.json"
 META_API_KEY = os.getenv("META_API_KEY")
 META_MODEL = os.getenv("META_MODEL", "muse-spark-1.3-contributor")
 UNAVAILABLE = "Unavailable"
-BUILD_VERSION = "meta-diff-v6"
+BUILD_VERSION = "meta-diff-v7"
+
+# Fixed English category IDs. AI must choose exactly one for each CREATE.
+CATEGORIES = {
+    "kitchen": "Kitchen roles: chef, cook, kitchen assistant, dishwasher, pizzaiolo.",
+    "service": "Restaurant service roles: waiter, waitress, service staff, chef de rang.",
+    "reception": "Reception and front-office roles: receptionist, front desk, guest relations.",
+    "housekeeping": "Housekeeping and cleaning roles: room attendant, cleaner, housekeeping staff.",
+    "management": "Management roles: restaurant manager, hotel manager, head chef, department manager.",
+    "office": "Office and administration roles: HR, accounting, marketing, administration.",
+    "bar": "Bar roles: bartender, barista, bar staff.",
+    "wellness": "Wellness and spa roles: masseur, spa therapist, spa staff.",
+    "technical": "Technical and facility roles: technician, maintenance, caretaker, facility staff.",
+    "apprenticeship": "Apprenticeships, traineeships and internships: apprentice, learner, intern.",
+    "other": "Use only when the position does not clearly fit another category.",
+}
+
+CATEGORY_INSTRUCTIONS = "\n".join(
+    f"- {category}: {description}" for category, description in CATEGORIES.items()
+)
 
 
 class Colors:
@@ -40,18 +60,24 @@ def log(message="", color=Colors.RESET):
     print(f"{color}{message}{Colors.RESET}")
 
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = f"""
 Compare added and removed HTML evidence. Return only compact valid JSON:
-{"changes":[{"action":"create","job_title":"...","job_url":"...","employment_type":"...","job_description":"..."},{"action":"delete","job_title":"...","job_url":"..."}]}
+{{"changes":[{{"action":"create","job_title":"...","job_url":"...","job_category":"kitchen","employment_type":"...","job_description":"..."}},{{"action":"delete","job_title":"...","job_url":"..."}}]}}
+
+Allowed job_category values for CREATE (choose exactly one):
+{CATEGORY_INSTRUCTIONS}
 
 Rules:
 - ADDED only = new vacancy (create); REMOVED only = deleted vacancy (delete).
 - If the same vacancy appears on both sides, ignore it. Match by URL first, then clear title.
 - Analyze every changed line, but ignore non-vacancy changes such as formatting, navigation and tracking.
 - Combine split links/titles using surrounding diff lines. Never invent facts.
+- For create, assign exactly one allowed job_category based primarily on the job title. Return the English category ID exactly as listed. Never invent category values. Use "other" only if no category fits.
 - For create, include employment_type and job_description only when supported by the diff; otherwise omit them. Resolve relative URLs against SOURCE_URL.
-- For delete, return title and URL when available.
-- If the supplied HTML is empty or contains no evidence of vacancies, return {"changes":[]}; never guess or invent vacancies.\n- Return {"changes":[]} when no vacancy change is found.
+- For delete, return title and URL when available. Do not include job_category for delete.
+- Do not generate job_id. Python generates job_id from employer_slug and normalized job_url.
+- If the supplied HTML is empty or contains no evidence of vacancies, return {{"changes":[]}}; never guess or invent vacancies.
+- Return {{"changes":[]}} when no vacancy change is found.
 """
 
 
@@ -159,18 +185,62 @@ def parse_json(raw):
         return json.loads(text[start:end + 1])
 
 
+def normalize_job_url(job_url, source_url=None):
+    """Resolve and normalize a job URL so the same vacancy gets the same ID."""
+    absolute_url = urljoin(source_url or "", str(job_url).strip())
+    parsed = urlsplit(absolute_url)
+
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    if scheme not in ("http", "https") or not hostname:
+        raise ValueError(f"Invalid job URL: {job_url!r}")
+
+    port = parsed.port
+    netloc = hostname
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        netloc = f"{hostname}:{port}"
+
+    path = parsed.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+
+    # Remove tracking parameters, but keep other query parameters that may identify a vacancy.
+    tracking_names = {"fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid"}
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in tracking_names
+    ]
+    query_items.sort()
+
+    return urlunsplit((scheme, netloc, path, urlencode(query_items, doseq=True), ""))
+
+
+def generate_job_id(employer_slug, job_url):
+    """Stable SHA-256 ID from employer_slug + normalized job_url."""
+    slug = str(employer_slug or "").strip().lower()
+    if not slug:
+        raise ValueError("Cannot generate job_id: employer_slug is missing.")
+    identity = f"{slug}|{job_url}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 def build_acf_json(data, site):
     if not isinstance(data, dict) or not isinstance(data.get("changes"), list):
         raise ValueError('AI response must contain a "changes" array.')
 
     source_url = value_or_unavailable(site.get("url"))
+    employer_slug = value_or_unavailable(site.get("slug"))
+    if employer_slug == UNAVAILABLE:
+        raise ValueError("Cannot generate job_id: employer slug is missing.")
+
     manual_metadata = {
         "employer_name": value_or_unavailable(site.get("name")),
         "job_location": value_or_unavailable(site.get("address")),
         "source_url": source_url,
         "canton": value_or_unavailable(site.get("canton")),
         "scope": value_or_unavailable(site.get("scope")),
-        "employer_slug": value_or_unavailable(site.get("slug")),
+        "employer_slug": employer_slug,
     }
 
     changes = []
@@ -182,19 +252,36 @@ def build_acf_json(data, site):
         if action not in ("create", "delete"):
             raise ValueError(f'Change #{number} has invalid action: {action!r}')
 
-        job_url = value_or_unavailable(item.get("job_url"))
-        if job_url != UNAVAILABLE and source_url != UNAVAILABLE:
-            job_url = urljoin(source_url, job_url)
+        raw_job_url = value_or_unavailable(item.get("job_url"))
+        if raw_job_url == UNAVAILABLE:
+            raise ValueError(
+                f"Change #{number} is missing job_url; cannot safely generate job_id."
+            )
+
+        job_url = normalize_job_url(
+            raw_job_url,
+            source_url if source_url != UNAVAILABLE else None,
+        )
+        job_id = generate_job_id(employer_slug, job_url)
 
         job = {
             "action": action,
+            "job_id": job_id,
             "job_title": value_or_unavailable(item.get("job_title")),
             "job_url": job_url,
         }
 
         if action == "create":
+            job_category = str(item.get("job_category", "")).strip().lower()
+            if job_category not in CATEGORIES:
+                raise ValueError(
+                    f"Change #{number} has invalid job_category {job_category!r}. "
+                    f"Allowed values: {', '.join(CATEGORIES)}"
+                )
+
             job.update({
                 **manual_metadata,
+                "job_category": job_category,
                 "employment_type": value_or_unavailable(item.get("employment_type")),
                 "job_description": value_or_unavailable(item.get("job_description")),
                 "scraped_at": date.today().isoformat(),
@@ -203,7 +290,6 @@ def build_acf_json(data, site):
         changes.append(job)
 
     return {"changes": changes}
-
 
 def print_token_usage(usage):
     if usage is None:
