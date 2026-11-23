@@ -21,7 +21,15 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from compare import compare_files, Colors, log
-from ai_prepare import META_MODEL, parse_json, print_token_usage
+from ai_prepare import (
+    SYSTEM_PROMPT,
+    META_MODEL,
+    build_acf_json,
+    load_site,
+    parse_json,
+    print_token_usage,
+    call_ai,
+)
 
 load_dotenv()
 
@@ -30,41 +38,9 @@ OUTPUT_DIR = PROJECT_DIR / "scrape_output"
 NEW_FILE = OUTPUT_DIR / "test.html"
 OLD_FILE = OUTPUT_DIR / "test-old.html"
 
-SYSTEM_PROMPT = """
-Compare added and removed HTML evidence to identify changes in job vacancies.
-Return ONLY valid JSON in this format:
-{
-  "changes": [
-    {
-      "action": "create",
-      "job_title": "job title",
-      "job_url": "job URL as shown in the HTML",
-      "employment_type": "employment type, if available",
-      "job_description": "description, if available"
-    },
-    {
-      "action": "delete",
-      "job_title": "job title",
-      "job_url": "job URL as shown in the HTML"
-    }
-  ]
-}
 
-Rules:
-- ADDED content exists in the new HTML only and can indicate a new or changed vacancy.
-- REMOVED content exists in the old HTML only and can indicate a vacancy that disappeared.
-- ADDED only = possible create; REMOVED only = possible delete.
-- If the same vacancy appears on both sides, ignore it. Match by URL first, then by a clear job title.
-- Analyze all changed lines and use surrounding lines to reconstruct split titles and links.
-- Ignore formatting, navigation, tracking, cookie notices and unrelated page changes.
-- Never invent a job, title, URL, employment type or description.
-- Keep relative URLs exactly as they appear. There is no source URL in this test mode.
-- If there is no clear evidence of a job vacancy change, return {"changes": []}.
-"""
-
-
-def build_ai_input(diff):
-    """Build the exact user content sent to Meta AI from the HTML diff."""
+def build_ai_input(diff, site):
+    """Build the test diff request, including employer URL for relative links."""
     added = diff["added"]
     removed = diff["removed"]
 
@@ -81,40 +57,30 @@ def build_ai_input(diff):
     return (
         "INPUT MODE: DIFF\n"
         "Analyze the changes between the new and old HTML.\n"
-        "Both ADDED and REMOVED sections are important.\n\n"
+        "Both ADDED and REMOVED sections are important.\n"
+        f"SOURCE_URL: {site.get('url', '')}\n\n"
         f"{section('=== ADDED: PRESENT IN NEW HTML ===', added, '+')}\n\n"
         f"{section('=== REMOVED: PRESENT IN OLD HTML ===', removed, '-')}"
     )
 
 
-def call_meta_ai(user_content):
-    """Send the test diff to Meta AI. No WordPress integration is used."""
-    api_key = os.getenv("META_API_KEY")
-    if not api_key:
-        raise RuntimeError("META_API_KEY missing from .env")
-
-    client = OpenAI(
-        base_url="https://api.meta.ai/v1",
-        api_key=api_key,
-    )
-    return client.chat.completions.create(
-        model=META_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        extra_body={"prompt_cache_key": "data-scraping-test-diff-v1"},
-        temperature=0,
-        reasoning_effort="minimal",
-        max_tokens=2000,
-    )
-
-
 def main():
-    no_ai = len(sys.argv) == 2 and sys.argv[1] == "--no-ai"
-    if len(sys.argv) > 2 or (len(sys.argv) == 2 and not no_ai):
-        log("Použitie: python test.py [--no-ai]", Colors.YELLOW)
+    args = sys.argv[1:]
+    no_ai = "--no-ai" in args
+    positional = [arg for arg in args if arg != "--no-ai"]
+
+    if len(positional) > 1 or (not no_ai and len(positional) != 1):
+        log("Použitie: python test.py <employer-slug> [--no-ai]", Colors.YELLOW)
+        log("Príklad: python test.py stoos-hotels", Colors.YELLOW)
         raise SystemExit(2)
+
+    site = None
+    if positional:
+        try:
+            site = load_site(positional[0])
+        except ValueError as error:
+            log(str(error), Colors.RED)
+            raise SystemExit(2)
 
     try:
         log("\n" + "=" * 78, Colors.BLUE)
@@ -137,7 +103,7 @@ def main():
             log("WordPress API: NOT CALLED.", Colors.YELLOW)
             return
 
-        user_content = build_ai_input(diff)
+        user_content = build_ai_input(diff, site)
 
         log("\n" + "=" * 78, Colors.BLUE)
         log("META AI ANALÝZA", Colors.BOLD + Colors.CYAN)
@@ -149,16 +115,14 @@ def main():
         print(user_content)
 
         log("\nOdosielam zmeny do Meta AI...", Colors.YELLOW)
-        response = call_meta_ai(user_content)
+        response = call_ai(user_content)
         print_token_usage(getattr(response, "usage", None))
 
         raw_output = response.choices[0].message.content or ""
         log("\n--- RAW AI OUTPUT ---", Colors.CYAN)
         print(raw_output)
 
-        result = parse_json(raw_output)
-        if not isinstance(result, dict) or not isinstance(result.get("changes"), list):
-            raise ValueError('AI odpoveď musí obsahovať pole "changes".')
+        result = build_acf_json(parse_json(raw_output), site)
 
         log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
         print(json.dumps(result, ensure_ascii=False, indent=2))
