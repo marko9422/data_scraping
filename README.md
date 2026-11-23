@@ -58,7 +58,7 @@ scrape_output/
 Potom spusti:
 
 ```bash
-python test.py
+python test.py stoos-hotels
 ```
 
 Porovná súbory, vypíše zmeny a odošle ich do Meta AI.
@@ -66,7 +66,7 @@ Porovná súbory, vypíše zmeny a odošle ich do Meta AI.
 Ak chceš iba porovnanie bez AI:
 
 ```bash
-python test.py --no-ai
+python test.py stoos-hotels stoos-hotels --no-ai
 ```
 
 Testovací režim nič nesťahuje a nemení tvoje HTML súbory.
@@ -117,8 +117,8 @@ Použije už uložené HTML pre daný slug, porovná ho a pošle zmeny do Meta A
 - `python scrape.py` – stiahne HTML všetkých webov v `sites.json`.
 - `python compare.py` – iba porovná HTML a vypíše zmeny.
 - `python ai_prepare.py <slug>` – použije uložené HTML a zavolá Meta AI.
-- `python test.py` – porovná testovacie HTML a zavolá Meta AI.
-- `python test.py --no-ai` – iba porovná testovacie HTML, bez AI.
+- `python test.py stoos-hotels` – porovná testovacie HTML a zavolá Meta AI.
+- `python test.py stoos-hotels stoos-hotels --no-ai` – iba porovná testovacie HTML, bez AI.
 
 **Pozor:** samostatné spustenie `scrape.py` môže prepísať aktuálne HTML a uložiť jeho predchádzajúcu verziu. Príkazy s Meta AI môžu spotrebovať API tokeny.
 
@@ -410,4 +410,4 @@ Pri `delete` Python doplní rovnaké `job_id` vypočítané z employer slug a UR
 
 Ak niektorú voliteľnú hodnotu Python nevie získať, doplní text `Unavailable`. Bez platnej URL však `job_id` nemožno bezpečne vytvoriť a spracovanie danej zmeny skončí chybou. Dátum `scraped_at` vytvára Python, nie AI.
 
-**Poznámka k test.py:** testovací skript má vlastný AI prompt. Vypíše priamo JSON od AI a nedopĺňa doň údaje zo `sites.json`. Preto jeho výstup nemusí obsahovať polia zamestnávateľa ani `scraped_at`.
+**Poznámka k test.py:** testovací skript používa rovnaký AI prompt, povolené kategórie, URL normalizáciu a tvorbu finálneho JSON ako hlavný workflow. Pri spustení s employer slug doplní údaje zo `sites.json` a vygeneruje rovnaké `job_id`. Stále však používa iba lokálne testovacie HTML a nikdy nespúšťa scraping ani WordPress API.
