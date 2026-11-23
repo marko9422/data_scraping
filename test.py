@@ -2,9 +2,8 @@
 test.py — samostatné testovanie porovnávania HTML a Meta AI.
 
 Spustenie:
-    python test.py stoos-hotels            # porovnanie + Meta AI + finálny JSON
-    python test.py stoos-hotels --no-ai    # iba porovnanie, bez API volania
-    python test.py --no-ai                 # porovnanie bez AI a bez employer metadata
+    python test.py           # porovnanie + Meta AI + finálny JSON
+    python test.py --no-ai   # iba porovnanie, bez API volania
 
 Používa iba:
     scrape_output/test.html
@@ -37,6 +36,10 @@ OUTPUT_DIR = PROJECT_DIR / "scrape_output"
 NEW_FILE = OUTPUT_DIR / "test.html"
 OLD_FILE = OUTPUT_DIR / "test-old.html"
 
+# Employer used to generate job_id and enrich the final JSON.
+# Change this constant when testing HTML files from another employer.
+TEST_EMPLOYER_SLUG = "stoos-hotels"
+
 
 def build_ai_input(diff, site):
     """Build the test diff request, including employer URL for relative links."""
@@ -65,21 +68,11 @@ def build_ai_input(diff, site):
 
 def main():
     args = sys.argv[1:]
-    no_ai = "--no-ai" in args
-    positional = [arg for arg in args if arg != "--no-ai"]
-
-    if len(positional) > 1 or (not no_ai and len(positional) != 1):
-        log("Použitie: python test.py <employer-slug> [--no-ai]", Colors.YELLOW)
-        log("Príklad: python test.py stoos-hotels", Colors.YELLOW)
+    if args not in ([], ["--no-ai"]):
+        log("Použitie: python test.py [--no-ai]", Colors.YELLOW)
         raise SystemExit(2)
 
-    site = None
-    if positional:
-        try:
-            site = load_site(positional[0])
-        except ValueError as error:
-            log(str(error), Colors.RED)
-            raise SystemExit(2)
+    no_ai = args == ["--no-ai"]
 
     try:
         log("\n" + "=" * 78, Colors.BLUE)
@@ -88,7 +81,7 @@ def main():
         log(f"Starý súbor: {OLD_FILE}", Colors.YELLOW)
         log("=" * 78, Colors.BLUE)
 
-        # Print the diff and retain its structured data for the AI request.
+        # Always compare the two fixed test snapshots.
         diff = compare_files(NEW_FILE, OLD_FILE)
 
         if no_ai:
@@ -98,14 +91,17 @@ def main():
 
         if not diff["added"] and not diff["removed"]:
             log("HTML súbory sú identické. Meta AI sa nevolá.", Colors.GREEN)
-            log("Výsledok: {\"changes\": []}", Colors.GREEN)
+            log('Výsledok: {"changes": []}', Colors.GREEN)
             log("WordPress API: NOT CALLED.", Colors.YELLOW)
             return
 
+        # The slug is configured above, so the command stays parameter-free.
+        site = load_site(TEST_EMPLOYER_SLUG)
         user_content = build_ai_input(diff, site)
 
         log("\n" + "=" * 78, Colors.BLUE)
         log("META AI ANALÝZA", Colors.BOLD + Colors.CYAN)
+        log(f"Zamestnávateľ: {site.get('name')} | Slug: {TEST_EMPLOYER_SLUG}", Colors.CYAN)
         log(f"Model: {META_MODEL}", Colors.CYAN)
         log("=" * 78, Colors.BLUE)
         log("\n--- SYSTEM PROMPT ---", Colors.CYAN)
@@ -121,19 +117,14 @@ def main():
         log("\n--- RAW AI OUTPUT ---", Colors.CYAN)
         print(raw_output)
 
+        # Same final JSON builder as the main ai_prepare.py workflow.
         result = build_acf_json(parse_json(raw_output), site)
 
         log("\n--- FINAL JSON ---", Colors.BOLD + Colors.GREEN)
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
-        creates = sum(
-            1 for item in result["changes"]
-            if isinstance(item, dict) and item.get("action") == "create"
-        )
-        deletes = sum(
-            1 for item in result["changes"]
-            if isinstance(item, dict) and item.get("action") == "delete"
-        )
+        creates = sum(1 for item in result["changes"] if item.get("action") == "create")
+        deletes = sum(1 for item in result["changes"] if item.get("action") == "delete")
         log(f"\nNové pracovné ponuky: {creates}", Colors.GREEN)
         log(f"Odstránené pracovné ponuky: {deletes}", Colors.RED)
         log("WordPress API: NOT CALLED. Nič nebolo odoslané do WordPressu.", Colors.YELLOW)
