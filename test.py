@@ -2,8 +2,9 @@
 test.py — samostatné testovanie porovnávania HTML a Meta AI.
 
 Spustenie:
-    python test.py           # porovnanie + Meta AI
-    python test.py --no-ai   # iba porovnanie, bez API volania
+    python test.py stoos-hotels            # porovnanie + Meta AI + finálny JSON
+    python test.py stoos-hotels --no-ai    # iba porovnanie, bez API volania
+    python test.py --no-ai                 # porovnanie bez AI a bez employer metadata
 
 Používa iba:
     scrape_output/test.html
@@ -13,12 +14,10 @@ Tento skript nemení HTML súbory, nespúšťa scraping a nikdy nevolá WordPres
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
 
 from compare import compare_files, Colors, log
 from ai_prepare import (
