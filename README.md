@@ -66,7 +66,7 @@ Porovná súbory, vypíše zmeny a odošle ich do Meta AI.
 Ak chceš iba porovnanie bez AI:
 
 ```bash
-python test.py stoos-hotels stoos-hotels --no-ai
+python test.py stoos-hotels --no-ai
 ```
 
 Testovací režim nič nesťahuje a nemení tvoje HTML súbory.
@@ -118,7 +118,7 @@ Použije už uložené HTML pre daný slug, porovná ho a pošle zmeny do Meta A
 - `python compare.py` – iba porovná HTML a vypíše zmeny.
 - `python ai_prepare.py <slug>` – použije uložené HTML a zavolá Meta AI.
 - `python test.py stoos-hotels` – porovná testovacie HTML a zavolá Meta AI.
-- `python test.py stoos-hotels stoos-hotels --no-ai` – iba porovná testovacie HTML, bez AI.
+- `python test.py stoos-hotels --no-ai` – iba porovná testovacie HTML, bez AI.
 
 **Pozor:** samostatné spustenie `scrape.py` môže prepísať aktuálne HTML a uložiť jeho predchádzajúcu verziu. Príkazy s Meta AI môžu spotrebovať API tokeny.
 
