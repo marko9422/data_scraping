@@ -2,3 +2,5 @@
 __pycache__/
 .env
 scrape_output/
+__pycache__/
+*.py[cod]

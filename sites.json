@@ -2,11 +2,57 @@
   {
     "name": "Stoos Hotels",
     "slug": "stoos-hotels",
-    "url": "https://stoos-hotels.ch/karriere/"
+    "url": "https://stoos-hotels.ch/karriere/",
+    "address": "Ringstrasse 10, 6433 Stoos, Switzerland",
+    "canton": "Schwyz",
+    "scope": "local"
   },
   {
     "name": "Gasthof zum Ochsen",
     "slug": "gasthof-zum-ochsen",
-    "url": "https://www.ochsen.ch/Jobs.htm"
+    "url": "https://www.ochsen.ch/Jobs.htm",
+    "address": "Ermitagestrasse 16, 4144 Arlesheim, Switzerland",
+    "canton": "Basel-Landschaft",
+    "scope": "local"
+  },
+  {
+    "name": "Krafft gruppe",
+    "slug": "krafft-gruppe",
+    "url": "https://www.krafftgruppe.ch/de/laufbahn/",
+    "address": "Brunngässlein 8 ,4052 Basel, Switzerland",
+    "canton": "Basel",
+    "scope": "local"
+  },
+  {
+    "name": "Les Trois Rois",
+    "slug": "les-trois-rois",
+    "url": "https://www.lestroisrois.com/de/corporate-legal/karriere/offene-stellen/",
+    "address": "Blumenrain 8, CH-4001 Basel, Switzerland",
+    "canton": "Basel",
+    "scope": "local"
+  },
+  {
+    "name": "Tisch77 AG",
+    "slug": "tisch77-ag",
+    "url": "https://www.ufer7.ch/de/ufer7/jobs/",
+    "address": "Untere Rheingasse 11, 4058 Basel, Switzerland",
+    "canton": "Basel",
+    "scope": "local"
+  },
+  {
+    "name": "Alchemist Basel",
+    "slug": "alchemist-basel",
+    "url": "https://www.alchemistbasel.ch/jobs/",
+    "address": "Alchemist Schifflände 1 4051 Basel, Switzerland",
+    "canton": "Basel",
+    "scope": "local"
+  },
+  {
+    "name": "burger-meister",
+    "slug": "burger-meister",
+    "url": "https://burger-meister.ch/jobs/",
+    "address": "Burger Meister Strasse 1, 4051 Basel, Switzerland",
+    "canton": "Switzerland",
+    "scope": "national"
   }
 ]

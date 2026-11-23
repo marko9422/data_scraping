@@ -1,8 +1,22 @@
+"""
+scrape.py — sťahovanie a čistenie HTML stránok.
+
+Čo tento súbor robí:
+1. Načíta webové stránky zo sites.json.
+2. Otvorí každú stránku cez Crawl4AI a počká na načítanie (networkidle).
+3. Vyčistí HTML pomocou BeautifulSoup — odstráni skripty, štýly,
+   obrázky a technický balast, pričom zachová text a odkazy.
+4. Uloží vyčistené HTML do priečinka scrape_output.
+
+Tento súbor sa bežne nespúšťa priamo. Spúšťa ho main.py.
+Žiadne AI spracovanie, porovnávanie zmien ani WordPress sa tu nevykonáva.
+"""
+
 import asyncio
-import difflib
 import json
 import re
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+import shutil
+import sys
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Comment
@@ -14,34 +28,75 @@ SITES_FILE = PROJECT_DIR / "sites.json"
 OUTPUT_DIR = PROJECT_DIR / "scrape_output"
 
 
+# ANSI farby pre čitateľnejší výpis v termináli.
+class Colors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    GRAY = "\033[90m"
+
+
+def log(message, color=Colors.RESET):
+    print(f"{color}{message}{Colors.RESET}")
+
+
 def load_sites():
-    """Load and validate websites from sites.json."""
+    """Načíta a skontroluje zoznam webových stránok."""
     if not SITES_FILE.exists():
-        raise FileNotFoundError(f"Configuration file not found: {SITES_FILE}")
+        raise FileNotFoundError(f"Konfiguračný súbor neexistuje: {SITES_FILE}")
 
     with SITES_FILE.open("r", encoding="utf-8") as file:
         sites = json.load(file)
 
     if not isinstance(sites, list) or not sites:
-        raise ValueError("sites.json must contain a non-empty list.")
+        raise ValueError("sites.json musí obsahovať neprázdny zoznam.")
 
     for site in sites:
         if not isinstance(site, dict) or not site.get("name") or not site.get("url"):
-            raise ValueError("Every website needs 'name' and 'url'.")
+            raise ValueError("Každá stránka musí mať vyplnené 'name' a 'url'.")
 
     return sites
 
 
 def make_filename(site):
-    """Create a safe filename for each website."""
+    """Vytvorí bezpečný názov HTML súboru podľa slug alebo názvu webu."""
     slug = site.get("slug") or site["name"].lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
     return f"{slug or 'website'}.html"
 
 
+def make_old_filename(site):
+    """Vytvorí názov záložného HTML snapshotu."""
+    return f"{Path(make_filename(site)).stem}-old.html"
+
+
 def clean_html(html):
-    """Remove technical noise while preserving readable content and links."""
+    """Odstráni technický balast, ale zachová čitateľný obsah a odkazy."""
     soup = BeautifulSoup(html, "html.parser")
+
+    # Odstráni cookie dialógy a známe cookie-consent kontajnery.
+    for tag in soup.find_all("dialog"):
+        tag.decompose()
+
+    cookie_selectors = [
+        "#usercentrics-root",
+        "#CybotCookiebotDialog",
+        "#onetrust-consent-sdk",
+        ".cookie-banner",
+        ".cookie-consent",
+        ".cookie-dialog",
+    ]
+    for selector in cookie_selectors:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    # Odstráni pätičku stránky; pracovné ponuky sa očakávajú v hlavnom obsahu.
+    for tag in soup.find_all("footer"):
+        tag.decompose()
 
     for tag in soup.find_all([
         "script", "style", "noscript", "svg", "canvas",
@@ -64,19 +119,16 @@ def clean_html(html):
             if name in allowed_attributes
         }
 
-    # Remove empty containers, but retain containers holding linked content.
+    # Odstráni prázdne kontajnery, ale zachová tie, ktoré obsahujú odkazy.
     for tag in soup.find_all(["div", "span", "section", "article"]):
-        if (
-            not tag.get_text(" ", strip=True)
-            and not tag.find("a", href=True)
-        ):
+        if not tag.get_text(" ", strip=True) and not tag.find("a", href=True):
             tag.decompose()
 
-    # Unwrap generic layout elements; their contents remain.
+    # Odstráni iba obalové HTML elementy, ich obsah zostane zachovaný.
     for tag in soup.find_all(["div", "span", "section", "article"]):
         tag.unwrap()
 
-    # Remove empty paragraphs and links without destinations.
+    # Odstráni prázdne odseky a odkazy bez textu a bez cieľovej adresy.
     for tag in soup.find_all(["p", "a"]):
         if not tag.get_text(" ", strip=True):
             if tag.name == "a" and tag.get("href"):
@@ -86,177 +138,71 @@ def clean_html(html):
     return soup.prettify()
 
 
-
-def normalize_html_for_comparison(html):
-    """Return stable page content, excluding technical and generated HTML noise."""
-    soup = BeautifulSoup(html, "html.parser")
-
-    for tag in soup.find_all(["head", "link", "meta", "script", "style", "noscript"]):
-        tag.decompose()
-
-    # Ignore cookie-consent controls; their order and labels can change independently
-    # of the actual page content.
-    cookie_control_labels = {
-        "cookie-einstellungen",
-        "weiter ohne einwilligung",
-        "schliessen",
-        "schließen",
-        "alle akzeptieren",
-        "auswahl speichern",
-        "einstellungen speichern",
-    }
-    for link in soup.find_all("a"):
-        label = link.get_text(" ", strip=True).casefold()
-        if label in cookie_control_labels:
-            link.decompose()
-
-    for tag in soup.find_all(True):
-        tag.attrs = {
-            name: value
-            for name, value in tag.attrs.items()
-            if name in {"href", "title", "datetime"}
-        }
-
-        href = tag.get("href")
-        if href:
-            if href.startswith("#"):
-                del tag["href"]
-            else:
-                parts = urlsplit(href)
-                query = [
-                    (key, value)
-                    for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                    if key.lower() not in {"ver", "v", "cb", "cache", "_"}
-                ]
-                tag["href"] = urlunsplit((
-                    parts.scheme, parts.netloc, parts.path,
-                    urlencode(query, doseq=True), ""
-                ))
-
-    return soup.prettify()
-
-
-def print_html_diff(old_html, new_html, filename):
-    """Print a unified diff showing exactly which lines changed."""
-    old_lines = old_html.splitlines()
-    new_lines = new_html.splitlines()
-
-    diff = list(difflib.unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=f"previous/{filename}",
-        tofile=f"current/{filename}",
-        lineterm="",
-        n=3,
-    ))
-
-    added = sum(
-        1 for line in diff
-        if line.startswith("+") and not line.startswith("+++")
-    )
-    removed = sum(
-        1 for line in diff
-        if line.startswith("-") and not line.startswith("---")
-    )
-
-    print("\n" + "=" * 70)
-    print(f"CHANGES IN: {filename}")
-    print(f"Lines added: {added} | Lines removed: {removed}")
-    print("=" * 70)
-
-    if diff:
-        print("\n".join(diff))
-    else:
-        print("No line-level differences found.")
-
-    print("=" * 70 + "\n")
-
-
-def compare_and_save(output_file, new_html):
-    """
-    Compare the new HTML with the saved version.
-
-    First run: save as NEW.
-    Same content: keep existing file.
-    Changed content: print differences, then replace existing file.
-    """
-    if not output_file.exists():
-        output_file.write_text(new_html, encoding="utf-8")
-        return "NEW"
-
-    old_html = output_file.read_text(encoding="utf-8")
-
-    old_content = normalize_html_for_comparison(old_html)
-    new_content = normalize_html_for_comparison(new_html)
-
-    if old_content == new_content:
-        return "UNCHANGED"
-
-    # Show only meaningful page content differences.
-    print_html_diff(old_content, new_content, output_file.name)
-
-    # Keep the latest cleaned HTML for the next comparison.
-    output_file.write_text(new_html, encoding="utf-8")
-    return "CHANGED"
-
-
-async def scrape_site(crawler, site, run_config):
-    """Scrape, clean, compare and save one website."""
+async def scrape_site(crawler, site, run_config, index, total):
+    """Stiahne, vyčistí a uloží HTML jednej webovej stránky."""
     name = site["name"]
     url = site["url"]
     output_file = OUTPUT_DIR / make_filename(site)
 
-    print(f"\nScraping: {name}")
-    print(f"URL: {url}")
+    log(f"\n[{index}/{total}] {name}", Colors.BOLD + Colors.CYAN)
+    log(f"URL: {url}", Colors.GRAY)
+    log("Načítavam stránku...", Colors.BLUE)
 
     try:
         result = await crawler.arun(url=url, config=run_config)
 
         if not result.success:
-            print(f"FAILED: {result.error_message}")
+            log(f"NEÚSPECH: {result.error_message}", Colors.RED)
             return False
 
-        html = result.html or result.cleaned_html
-        if not html:
-            print("FAILED: The page returned empty HTML.")
-            return False
+        html = result.html if result.html is not None else result.cleaned_html
+        if html is None:
+            html = ""
 
+        if not html.strip():
+            log("UPOZORNENIE: Stránka vrátila prázdne HTML. Uložím prázdny snapshot; AI dostane pokyn nevyvodzovať žiadne pracovné ponuky.", Colors.YELLOW)
+
+        log("Čistím HTML pomocou BeautifulSoup...", Colors.BLUE)
         cleaned = clean_html(html)
-        status = compare_and_save(output_file, cleaned)
 
-        if status == "NEW":
-            print("NEW: First scrape. HTML saved.")
-        elif status == "UNCHANGED":
-            print("UNCHANGED: No meaningful page content changed.")
-        else:
-            print("CHANGED: Page content changed. Saved the new HTML.")
+        # Pred prepísaním aktuálneho HTML zachovaj predchádzajúci snapshot.
+        if output_file.exists():
+            old_file = OUTPUT_DIR / make_old_filename(site)
+            shutil.copy2(output_file, old_file)
+            log(f"Predchádzajúci HTML snapshot uložený: {old_file.name}", Colors.YELLOW)
 
-        original_size = len(html.encode("utf-8"))
-        cleaned_size = len(cleaned.encode("utf-8"))
-        reduction = (
-            (1 - cleaned_size / original_size) * 100
-            if original_size else 0
-        )
-        link_count = len(
-            BeautifulSoup(cleaned, "html.parser").find_all("a", href=True)
-        )
+        output_file.write_text(cleaned, encoding="utf-8")
 
-        print(f"File: {output_file.relative_to(PROJECT_DIR)}")
-        print(f"Original size: {original_size:,} bytes")
-        print(f"Cleaned size: {cleaned_size:,} bytes")
-        print(f"Size reduction: {reduction:.1f}%")
-        print(f"Links preserved: {link_count}")
+        log("✓ HTML úspešne uložené", Colors.GREEN)
+        log(f"  Súbor: {output_file.relative_to(PROJECT_DIR)}")
 
         return True
 
     except Exception as error:
-        print(f"ERROR while scraping {name}: {error}")
+        log(f"CHYBA pri spracovaní {name}: {error}", Colors.RED)
         return False
 
 
-async def main():
+async def run_scraper(site_slug=None):
+    """Scrapuje jednu stránku podľa slug alebo všetky stránky zo sites.json."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     sites = load_sites()
+
+    if site_slug:
+        sites = [site for site in sites if site.get("slug") == site_slug]
+        if not sites:
+            available = ", ".join(
+                str(site.get("slug")) for site in load_sites() if site.get("slug")
+            )
+            raise ValueError(
+                f"Slug '{site_slug}' sa nenašiel v sites.json. Dostupné slugy: {available}"
+            )
+
+    log("\n" + "=" * 58, Colors.BLUE)
+    log("  SCRAPING — SŤAHOVANIE A ČISTENIE HTML", Colors.BOLD + Colors.BLUE)
+    log("=" * 58, Colors.BLUE)
+    log(f"Počet webových stránok: {len(sites)}")
+    log(f"Výstupný priečinok: {OUTPUT_DIR}\n", Colors.GRAY)
 
     browser_config = BrowserConfig(headless=True)
     run_config = CrawlerRunConfig(
@@ -265,16 +211,42 @@ async def main():
     )
 
     successful = 0
-
     async with AsyncWebCrawler(config=browser_config) as crawler:
-        for site in sites:
-            if await scrape_site(crawler, site, run_config):
+        for index, site in enumerate(sites, start=1):
+            if await scrape_site(crawler, site, run_config, index, len(sites)):
                 successful += 1
 
-    print("\nScraping finished.")
-    print(f"Successful: {successful}/{len(sites)}")
-    print(f"Output folder: {OUTPUT_DIR}")
+    failed = len(sites) - successful
+    log("\n" + "-" * 58, Colors.BLUE)
+    log("SÚHRN SCRAPINGU", Colors.BOLD + Colors.BLUE)
+    log(f"Úspešne spracované: {successful}/{len(sites)}", Colors.GREEN)
+    if failed:
+        log(f"Neúspešné: {failed}/{len(sites)}", Colors.RED)
+    log(f"HTML súbory nájdeš v: {OUTPUT_DIR}", Colors.GRAY)
+    log("-" * 58 + "\n", Colors.BLUE)
+
+    return successful, failed
+
+
+def main():
+    """CLI: python scrape.py [slug]. Bez slug spracuje všetky weby."""
+    if len(sys.argv) > 2:
+        log("Použitie: python scrape.py [slug]", Colors.YELLOW)
+        raise SystemExit(2)
+
+    site_slug = sys.argv[1] if len(sys.argv) == 2 else None
+
+    try:
+        successful, failed = asyncio.run(run_scraper(site_slug))
+        if failed:
+            raise SystemExit(1)
+    except KeyboardInterrupt:
+        log("\nScraping bol prerušený používateľom.", Colors.YELLOW)
+        raise SystemExit(130)
+    except Exception as error:
+        log(f"\nFATAL ERROR: {error}", Colors.RED)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
