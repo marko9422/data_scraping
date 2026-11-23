@@ -200,7 +200,102 @@ crawl4ai-setup
 
 ---
 
-## 7. Ako vyzerá JSON z AI
+## 7. JOB_ID a kategórie pracovných ponúk
+
+Každá pracovná ponuka dostane stabilné unikátne pole `job_id`. Python ho vypočíta, AI ho negeneruje.
+
+### Ako sa vytvára JOB_ID
+
+Základom je kombinácia:
+
+```text
+employer_slug + normalized_job_url
+```
+
+Napríklad:
+
+```text
+stoos-hotels|https://stoos-hotels.ch/jobs/koch
+```
+
+Python z tejto kombinácie vypočíta SHA-256 hash. Rovnaký zamestnávateľ a rovnaká normalizovaná URL vždy vytvoria rovnaké `job_id`.
+
+- Názov pracovnej pozície nie je súčasťou ID.
+- Zmena názvu pozície nemení ID.
+- Rovnaká URL u iného zamestnávateľa vytvorí iné ID.
+- Zmena URL vytvorí nové ID.
+- Pred hashovaním sa URL normalizuje: odstráni sa fragment, bežné tracking parametre a koncová lomka (okrem koreňovej URL). Ostatné query parametre zostávajú, pretože môžu identifikovať konkrétnu ponuku.
+
+### Kategórie
+
+Pri akcii `create` AI priradí presne jednu kategóriu podľa názvu pracovnej pozície. Môže vybrať iba z tohto pevného zoznamu:
+
+| JSON hodnota | Význam |
+|---|---|
+| `kitchen` | Kitchen – kuchyňa |
+| `service` | Service – servis |
+| `reception` | Reception – recepcia |
+| `housekeeping` | Housekeeping – upratovanie a izby |
+| `management` | Management – vedenie a manažment |
+| `office` | Office – administratíva, HR, účtovníctvo, marketing |
+| `bar` | Bar – barman, barista |
+| `wellness` | Wellness – spa a masáže |
+| `technical` | Technical – údržba a technické služby |
+| `apprenticeship` | Apprenticeship – učni, stáže a prax |
+| `other` | Other – ostatné pozície |
+
+AI nesmie vytvárať vlastné kategórie. Python kontroluje, či je vrátená kategória v povolenom zozname. Pri `delete` sa kategória neposiela.
+
+### Príklad výsledného JSON – create
+
+AI vráti názov, URL a kategóriu. Python doplní `job_id`, údaje zamestnávateľa a dátum:
+
+```json
+{
+  "changes": [
+    {
+      "action": "create",
+      "job_id": "sha256-hash-generated-by-python",
+      "job_title": "Koch / Köchin",
+      "job_id": "sha256-hash-generated-by-python",
+      "job_url": "https://example.ch/jobs/koch",
+      "employer_name": "Stoos Hotels",
+      "job_location": "Ringstrasse 10, 6433 Stoos, Switzerland",
+      "source_url": "https://stoos-hotels.ch/karriere/",
+      "canton": "Schwyz",
+      "scope": "local",
+      "employer_slug": "stoos-hotels",
+      "job_category": "kitchen",
+      "employment_type": "100%",
+      "job_description": "Preparing meals and working in the kitchen",
+      "scraped_at": "2026-11-23"
+    }
+  ]
+}
+```
+
+### Príklad výsledného JSON – delete
+
+Python vypočíta rovnaké `job_id` z `employer_slug` a normalizovanej URL starej ponuky. Kategória ani ostatné údaje zamestnávateľa pri odstránení nie sú potrebné.
+
+```json
+{
+  "changes": [
+    {
+      "action": "delete",
+      "job_id": "sha256-hash-generated-by-python",
+      "job_title": "Koch / Köchin",
+      "job_url": "https://example.ch/jobs/koch"
+    }
+  ]
+}
+```
+
+**Dôležité pre budúce prepojenie s WordPressom:** WordPress musí ukladať `job_id` ako vlastné pole. Pri CREATE sa podľa neho bude kontrolovať duplicita a pri DELETE sa podľa neho nájde presná ponuka.
+
+---
+
+## 8. Ako vyzerá JSON z AI
 
 Pri bežnom workflowe (`main.py` alebo `ai_prepare.py`) AI vracia objekt `changes`.
 
@@ -215,6 +310,7 @@ Toto sú polia, ktoré AI dostáva v zadaní:
       "action": "create",
       "job_title": "Koch / Köchin",
       "job_url": "https://example.ch/jobs/koch",
+      "job_category": "kitchen",
       "employment_type": "100%",
       "job_description": "Príprava jedál a práca v kuchyni"
     }
@@ -226,6 +322,7 @@ AI dodáva:
 - `action` – `create`
 - `job_title` – názov pracovnej pozície
 - `job_url` – odkaz na pracovnú ponuku
+- `job_category` – jedna povolená anglická kategória (napr. `kitchen`, `service`)
 - `employment_type` – úväzok, ak ho vie z HTML zistiť
 - `job_description` – popis práce, ak ho vie z HTML zistiť
 
@@ -238,6 +335,7 @@ Posledné dve polia AI nemusí vrátiť, ak ich nevie spoľahlivo zistiť.
   "changes": [
     {
       "action": "delete",
+      "job_id": "sha256-hash-generated-by-python",
       "job_title": "Koch / Köchin",
       "job_url": "https://example.ch/jobs/koch"
     }
@@ -260,7 +358,9 @@ Pri bežnom workflowe Python vezme údaje zamestnávateľa z príslušného záz
 |---|---|
 | `action` | AI |
 | `job_title` | AI |
-| `job_url` | AI; Python prevedie relatívny odkaz na úplnú URL pomocou adresy webu |
+| `job_url` | AI; Python prevedie relatívny odkaz na úplnú a normalizovanú URL |
+| `job_id` | Python – SHA-256 z `employer_slug + normalized_job_url` |
+| `job_category` | AI – jedna kategória z pevného povoleného zoznamu |
 | `employer_name` | `name` zo sites.json |
 | `job_location` | `address` zo sites.json |
 | `source_url` | `url` zo sites.json |
@@ -286,6 +386,7 @@ Príklad výsledného JSON pre `create` po doplnení údajov Python-om:
       "canton": "Schwyz",
       "scope": "local",
       "employer_slug": "stoos-hotels",
+      "job_category": "kitchen",
       "employment_type": "100%",
       "job_description": "Príprava jedál a práca v kuchyni",
       "scraped_at": "2026-11-22"
@@ -294,7 +395,7 @@ Príklad výsledného JSON pre `create` po doplnení údajov Python-om:
 }
 ```
 
-Pri `delete` Python výsledok ponechá len v tomto tvare:
+Pri `delete` Python doplní rovnaké `job_id` vypočítané z employer slug a URL. Výsledok bude mať tento tvar:
 
 ```json
 {
@@ -308,6 +409,6 @@ Pri `delete` Python výsledok ponechá len v tomto tvare:
 }
 ```
 
-Ak niektorú hodnotu Python nevie získať, doplní text `Unavailable`. Dátum `scraped_at` vytvára Python, nie AI.
+Ak niektorú voliteľnú hodnotu Python nevie získať, doplní text `Unavailable`. Bez platnej URL však `job_id` nemožno bezpečne vytvoriť a spracovanie danej zmeny skončí chybou. Dátum `scraped_at` vytvára Python, nie AI.
 
 **Poznámka k test.py:** testovací skript má vlastný AI prompt. Vypíše priamo JSON od AI a nedopĺňa doň údaje zo `sites.json`. Preto jeho výstup nemusí obsahovať polia zamestnávateľa ani `scraped_at`.
